@@ -1,16 +1,30 @@
 //! Разбор и сборка строк (lyrics_sources.py: lines_from_lrc, build_from_timed_lines, interpolate_words,
-//! word_from_parts, group_syllables, parse_yrc, add_gaps). Округление времени — round(x, 3).
+//! word_from_parts, group_syllables, parse_yrc, parse_ttml, parse_elrc, add_gaps). Округление времени — round(x, 3).
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::text::{ends_with_cjk, is_meta_line, py_isspace, py_splitlines, py_strip};
+use crate::text::{ends_with_cjk, is_meta_line, is_placeholder, py_isspace, py_splitlines, py_strip};
 use crate::{GAP_MIN, Line, Word};
 
 static LRC_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([0-9]+):([0-9]+(?:[.:][0-9]+)?)\]").unwrap());
 static LRC_WORD_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[0-9]+:[0-9]+(?:[.:][0-9]+)?>").unwrap());
+static ELRC_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<([0-9]+):([0-9]+(?:[.:][0-9]+)?)>([^<\r\n]*)").unwrap());
 static YRC_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[([0-9]+),([0-9]+)\](.*)$").unwrap());
 static YRC_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(([0-9]+),([0-9]+),[0-9]+\)([^(]*)").unwrap());
+
+static TTML_P: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<p\b([^>]*)>(.*?)</p>").unwrap());
+static TTML_AUX_SPAN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<span\b[^>]*\bttm:role\s*=\s*["']x-(?:translation|roman)["'][^>]*>.*?</span>"#).unwrap()
+});
+static TTML_BG_SPAN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<span\b[^>]*\bttm:role\s*=\s*["']x-bg["'][^>]*>.*?</span>"#).unwrap()
+});
+static TTML_SPAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<span\b([^>]*)>([^<]*)</span>").unwrap());
+static TTML_BEGIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bbegin\s*=\s*["']([^"']+)["']"#).unwrap());
+static TTML_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bend\s*=\s*["']([^"']+)["']"#).unwrap());
+static XML_TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
 
 /// round(x, 3) Python: точное десятичное округление (половина — к чётному), а не (x·1000).round()/1000
 pub fn round3(x: f64) -> f64 {
@@ -40,6 +54,226 @@ pub fn lines_from_lrc(lrc: &str) -> Vec<(f64, String)> {
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
     out
+}
+
+/// Enhanced LRC (`[mm:ss.xx]<mm:ss.xx>слово ...`) → строки по словам (`i = false`), если в LRC есть словесные теги.
+pub fn parse_elrc(lrc: &str, duration: f64) -> Option<Vec<Line>> {
+    if !ELRC_WORD.is_match(lrc) {
+        return None;
+    }
+    let mut raw_lines: Vec<(f64, String)> = Vec::new();
+    for raw in py_splitlines(lrc) {
+        let stamps: Vec<(u64, f64)> = LRC_TAG
+            .captures_iter(raw)
+            .filter_map(|c| Some((c[1].parse().ok()?, c[2].replace(':', ".").parse().ok()?)))
+            .collect();
+        if stamps.is_empty() {
+            continue;
+        }
+        let body = py_strip(&LRC_TAG.replace_all(raw, "")).to_owned();
+        for (m, s) in stamps {
+            raw_lines.push(((m * 60) as f64 + s, body.clone()));
+        }
+    }
+    raw_lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if raw_lines.is_empty() {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    let mut has_real_words = false;
+    for (idx, (line_t, body)) in raw_lines.iter().enumerate() {
+        if body.is_empty() {
+            continue;
+        }
+        let next_t = raw_lines
+            .get(idx + 1)
+            .map(|(t, _)| *t)
+            .unwrap_or_else(|| if duration > *line_t { duration } else { *line_t + 5.0 });
+        let plain = LRC_WORD_TAG.replace_all(body, "");
+        let plain = py_strip(&plain);
+        if plain.is_empty() || plain == "\u{266a}" || is_meta_line(plain) {
+            continue;
+        }
+
+        let caps: Vec<(f64, String)> = ELRC_WORD
+            .captures_iter(body)
+            .filter_map(|c| {
+                let m: u64 = c[1].parse().ok()?;
+                let s: f64 = c[2].replace(':', ".").parse().ok()?;
+                Some(((m * 60) as f64 + s, c[3].to_owned()))
+            })
+            .collect();
+
+        if !caps.is_empty() {
+            let mut sylls: Vec<(String, f64, f64)> = Vec::new();
+            for (i, (s, chunk)) in caps.iter().enumerate() {
+                if chunk.is_empty() {
+                    continue;
+                }
+                let e = match caps.get(i + 1) {
+                    Some((ns, _)) => (*ns).max(*s + 0.01),
+                    None => (next_t - 0.05).clamp(*s + 0.15, *s + 4.0),
+                };
+                if py_strip(chunk).is_empty()
+                    && let Some(last) = sylls.last_mut()
+                {
+                    last.0.push_str(chunk);
+                    last.2 = last.2.max(e);
+                } else {
+                    sylls.push((chunk.clone(), *s, e));
+                }
+            }
+            let words = group_syllables(&sylls);
+            if let (Some(first), Some(last)) = (words.first(), words.last()) {
+                has_real_words = true;
+                out.push(Line::Words {
+                    t: round3(line_t.min(first.s)),
+                    e: round3(last.e),
+                    w: words,
+                    i: false,
+                });
+            }
+        } else {
+            let n_chars = plain.chars().count() as f64;
+            let sung = (n_chars * 0.085 + 0.4).clamp(1.2, 9.0);
+            let end = (next_t - 0.05).min(*line_t + sung).max(*line_t + 0.5);
+            out.push(Line::Words {
+                t: round3(*line_t),
+                e: round3(end),
+                w: interpolate_words(plain, *line_t, end),
+                i: true,
+            });
+        }
+    }
+    (has_real_words && !out.is_empty()).then_some(out)
+}
+
+/// Время TTML (`"00:01:23.456"`, `"01:23.45"`, `"12.345s"`, `"12345ms"`) → секунды.
+pub fn parse_ttml_time(raw: &str) -> Option<f64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(ms) = s.strip_suffix("ms") {
+        return ms.trim().parse::<f64>().ok().map(|v| v / 1000.0);
+    }
+    let s = s.strip_suffix('s').unwrap_or(s).trim();
+    let parts: Vec<&str> = s.split(':').collect();
+    match parts.as_slice() {
+        [sec] => sec.parse::<f64>().ok(),
+        [min, sec] => Some(min.parse::<f64>().ok()? * 60.0 + sec.parse::<f64>().ok()?),
+        [hr, min, sec] => {
+            Some(hr.parse::<f64>().ok()? * 3600.0 + min.parse::<f64>().ok()? * 60.0 + sec.parse::<f64>().ok()?)
+        }
+        _ => None,
+    }
+}
+
+fn decode_xml_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_owned();
+    }
+    s.replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// Разбор Apple Music / AMLL TTML (`.ttml`): возвращает `("word", lines)` при наличии слоговых `<span>`,
+/// либо `("line", lines)` при построчной разметке `<p begin="..." end="...">`.
+pub fn parse_ttml(ttml: &str, duration: f64) -> Option<(&'static str, Vec<Line>)> {
+    let mut word_lines = Vec::new();
+    let mut timed_pairs: Vec<(f64, String)> = Vec::new();
+
+    for cap in TTML_P.captures_iter(ttml) {
+        let p_attrs = &cap[1];
+        let p_raw = &cap[2];
+        let p_begin = TTML_BEGIN.captures(p_attrs).and_then(|c| parse_ttml_time(&c[1]));
+        let p_end = TTML_END.captures(p_attrs).and_then(|c| parse_ttml_time(&c[1]));
+
+        let without_aux = TTML_AUX_SPAN.replace_all(p_raw, "");
+        let without_bg = TTML_BG_SPAN.replace_all(&without_aux, "");
+        let body: &str = if TTML_SPAN.is_match(&without_bg) { &without_bg } else { &without_aux };
+
+        let mut sylls: Vec<(String, f64, f64)> = Vec::new();
+        let mut last_match_end: Option<usize> = None;
+        for m in TTML_SPAN.captures_iter(body) {
+            let whole = m.get(0).unwrap();
+            let span_attrs = &m[1];
+            let span_text = decode_xml_entities(&m[2]);
+            let Some(s) = TTML_BEGIN.captures(span_attrs).and_then(|c| parse_ttml_time(&c[1])) else {
+                continue;
+            };
+            let e = TTML_END
+                .captures(span_attrs)
+                .and_then(|c| parse_ttml_time(&c[1]))
+                .unwrap_or(s + 0.15)
+                .max(s);
+
+            if let Some(prev_end) = last_match_end {
+                let between = &body[prev_end..whole.start()];
+                if between.chars().any(py_isspace)
+                    && let Some(prev) = sylls.last_mut()
+                    && !prev.0.chars().last().is_some_and(py_isspace)
+                {
+                    prev.0.push(' ');
+                }
+            }
+            last_match_end = Some(whole.end());
+
+            if span_text.is_empty() {
+                continue;
+            }
+            if py_strip(&span_text).is_empty() {
+                if let Some(prev) = sylls.last_mut()
+                    && !prev.0.chars().last().is_some_and(py_isspace)
+                {
+                    prev.0.push(' ');
+                }
+            } else {
+                sylls.push((span_text, s, e));
+            }
+        }
+
+        if !sylls.is_empty() {
+            let joined: String = sylls.iter().map(|s| s.0.as_str()).collect();
+            let clean = py_strip(&joined);
+            if clean.is_empty() || clean == "\u{266a}" || is_meta_line(clean) {
+                continue;
+            }
+            let words = group_syllables(&sylls);
+            let Some(last) = words.last() else { continue };
+            let first_s = words.first().map(|w| w.s).unwrap_or(0.0);
+            let t = round3(p_begin.unwrap_or(first_s).min(first_s));
+            let e = round3(p_end.unwrap_or(last.e).max(last.e));
+            word_lines.push(Line::Words { t, e, w: words, i: false });
+        } else if let Some(t) = p_begin {
+            let stripped = XML_TAGS.replace_all(&without_aux, " ");
+            let decoded = decode_xml_entities(&stripped);
+            let text = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !text.is_empty() && text != "\u{266a}" && !is_meta_line(&text) {
+                timed_pairs.push((t, text));
+            }
+        }
+    }
+
+    if !word_lines.is_empty() {
+        let texts: Vec<String> = word_lines.iter().map(Line::text).collect();
+        if !is_placeholder(texts.iter().map(String::as_str)) {
+            return Some(("word", word_lines));
+        }
+    }
+    if !timed_pairs.is_empty() && !is_placeholder(timed_pairs.iter().map(|(_, t)| t.as_str())) {
+        let lines = build_from_timed_lines(&timed_pairs, duration);
+        if !lines.is_empty() {
+            return Some(("line", lines));
+        }
+    }
+    None
 }
 
 /// Построчный текст → строки со словами, интерполированными по длине (i = true). Мета-строки (автор, композитор…) выкидываются.
@@ -249,6 +483,38 @@ mod tests {
     fn enhanced_tags_are_stripped() {
         let pairs = lines_from_lrc("[00:01.00]<00:01.00>раз <00:01.50>два\r\n[00:02:50] три ");
         assert_eq!(pairs, vec![(1.0, "раз два".to_owned()), (2.5, "три".to_owned())]);
+    }
+
+    #[test]
+    fn elrc_keeps_word_timestamps() {
+        let raw = "[00:01.00]<00:01.00>Hel<00:01.50>lo <00:02.00>world\n[00:04.00]<00:04.00>end";
+        let lines = parse_elrc(raw, 10.0).unwrap();
+        assert_eq!(lines.len(), 2);
+        let w = words(&lines[0]);
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].x, "Hello ");
+        assert_eq!((w[0].s, w[0].e), (1.0, 2.0));
+        assert_eq!(w[1].x, "world");
+    }
+
+    #[test]
+    fn ttml_is_parsed_to_words() {
+        let xml = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+          <body><div>
+            <p begin="00:01.000" end="00:03.000">
+              <span begin="00:01.000" end="00:01.500">Hel</span><span begin="00:01.500" end="00:02.000">lo</span>
+              <span begin="00:02.000" end="00:03.000">world</span>
+              <span ttm:role="x-translation">Привет мир</span>
+            </p>
+          </div></body>
+        </tt>"#;
+        let (kind, lines) = parse_ttml(xml, 10.0).unwrap();
+        assert_eq!(kind, "word");
+        assert_eq!(lines.len(), 1);
+        let w = words(&lines[0]);
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].x, "Hello ");
+        assert_eq!(w[1].x, "world");
     }
 
     #[test]

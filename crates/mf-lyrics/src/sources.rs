@@ -1,6 +1,9 @@
-//! Внешние источники (lyrics_sources.py). Все запросы — с User-Agent из crate::USER_AGENT, таймаут TIMEOUT_SECS,
+//! Внешние источники (lyrics_sources.py + Apple Music / LyricsPlus и база сообщества AMLL TTML DB).
+//! Все запросы — с User-Agent из crate::USER_AGENT, таймаут TIMEOUT_SECS,
 //! до 2 повторов при сетевой ошибке/5xx с паузой 0,7·(n+1) с.
 //!
+//! - AMLL TTML DB (сообщество): `https://raw.githubusercontent.com/amll-dev/amll-ttml-db/refs/heads/main/spotify-lyrics/{track_id}.{ttml|yrc}`;
+//! - Apple Music / LyricsPlus (агрегатор Kpoe): `/v2/lyrics/get` (`source=apple,lyricsplus,musixmatch-word,musixmatch`);
 //! - NetEase поиск: GET https://music.163.com/api/cloudsearch/pc?s=<clean_title primary_artist>&type=1&limit=15&offset=0
 //!   (Referer: https://music.163.com); выбор лучшего — правила ne_search;
 //! - NetEase текст: POST https://interface3.music.163.com/eapi/song/lyric/v1, форма params=<eapi>,
@@ -23,8 +26,8 @@ use md5::{Digest, Md5};
 use reqwest::header::{REFERER, USER_AGENT};
 use serde_json::{Value, json};
 
-use crate::lrc::{build_from_timed_lines, group_syllables, round3};
-use crate::text::{clean_title, norm, primary_artist, similar, version_tags};
+use crate::lrc::{build_from_timed_lines, group_syllables, parse_ttml, parse_yrc, round3};
+use crate::text::{clean_title, ends_with_cjk, is_meta_line, is_placeholder, norm, primary_artist, py_isspace, py_strip, similar, version_tags};
 use crate::{Line, LyricsQuery, TIMEOUT_SECS};
 
 const RETRIES: u32 = 2;
@@ -35,6 +38,14 @@ pub const MXM_BASE: &str = "https://apic-desktop.musixmatch.com/ws/1.1/";
 pub const MXM_HEADERS: [(&str, &str); 2] = [("authority", "apic-desktop.musixmatch.com"), ("cookie", "x-mxm-token-guid=")];
 const MXM_APP_ID: &str = "web-desktop-app-v1.0";
 const LRCLIB_HEADER: (&str, &str) = ("Lrclib-Client", "materialfy");
+
+const AMLL_RAW_BASE: &str = "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/refs/heads/main/spotify-lyrics";
+const LYRICSPLUS_BASES: [&str; 4] = [
+    "https://lyricsplus.prjktla.workers.dev",
+    "https://lyricsplus.binimum.org",
+    "https://lyricsplus.atomix.one",
+    "https://lyricsplus-seven.vercel.app",
+];
 
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 
@@ -162,6 +173,234 @@ fn py_float(v: &Value, what: &str) -> Result<f64, String> {
 
 fn now_secs() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+// ── AMLL TTML DB (сообщество, по Spotify track_id) ───────────────────────────
+
+/// Поиск в открытой базе сообщества `amll-dev/amll-ttml-db` по Spotify `track_id` (`.ttml` и `.yrc`).
+pub async fn amll_fetch(http: &reqwest::Client, track_id: &str, duration: f64) -> Option<(&'static str, Vec<Line>)> {
+    let id = track_id.trim();
+    if id.len() < 15 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let fast_timeout = Duration::from_secs(4);
+    let ttml_url = format!("{AMLL_RAW_BASE}/{id}.ttml");
+    if let Ok(resp) = http.get(&ttml_url).header(USER_AGENT, crate::USER_AGENT).timeout(fast_timeout).send().await
+        && resp.status().is_success()
+        && let Ok(bytes) = resp.bytes().await
+    {
+        let raw = String::from_utf8_lossy(&bytes);
+        if let Some(parsed) = parse_ttml(&raw, duration) {
+            return Some(parsed);
+        }
+    }
+
+    let yrc_url = format!("{AMLL_RAW_BASE}/{id}.yrc");
+    if let Ok(resp) = http.get(&yrc_url).header(USER_AGENT, crate::USER_AGENT).timeout(fast_timeout).send().await
+        && resp.status().is_success()
+        && let Ok(bytes) = resp.bytes().await
+    {
+        let raw = String::from_utf8_lossy(&bytes);
+        let lines = parse_yrc(&raw);
+        let texts: Vec<String> = lines.iter().map(Line::text).collect();
+        if !lines.is_empty() && !is_placeholder(texts.iter().map(String::as_str)) {
+            return Some(("word", lines));
+        }
+    }
+    None
+}
+
+// ── Apple Music / LyricsPlus (агрегатор Kpoe v2) ─────────────────────────────
+
+/// Запрос к зеркалам LyricsPlus (`/v2/lyrics/get`), которые отдают послоговые тексты Apple Music (TTML),
+/// LyricsPlus (сообщество) и Musixmatch-word. Возвращает `(источник, "word"|"line", строки)`.
+pub async fn lyricsplus_fetch(http: &reqwest::Client, query: &LyricsQuery) -> Option<(&'static str, &'static str, Vec<Line>)> {
+    let title = clean_title(&query.title);
+    let artist = primary_artist(&query.artist);
+    if title.is_empty() && query.title.trim().is_empty() {
+        return None;
+    }
+    let q_title = if title.is_empty() { query.title.trim().to_owned() } else { title };
+    let mut params: Vec<(&str, String)> = vec![
+        ("title", q_title),
+        ("artist", artist),
+        ("source", "apple,lyricsplus,musixmatch-word,musixmatch".into()),
+    ];
+    if !query.album.trim().is_empty() {
+        params.push(("album", query.album.trim().to_owned()));
+    }
+    if query.duration > 0.0 {
+        params.push(("duration", (query.duration.round_ties_even() as i64).to_string()));
+    }
+    let q_ref: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let fast_timeout = Duration::from_secs(4);
+    let mut not_found_votes = 0;
+
+    for base in LYRICSPLUS_BASES {
+        let url = format!("{base}/v2/lyrics/get");
+        let resp = match http.get(&url).query(&q_ref).header(USER_AGENT, crate::USER_AGENT).timeout(fast_timeout).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("lyrics: lyricsplus mirror {base} error: {e}");
+                continue;
+            }
+        };
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            not_found_votes += 1;
+            if not_found_votes >= 2 {
+                break;
+            }
+            continue;
+        }
+        if !status.is_success() {
+            continue;
+        }
+        let Ok(bytes) = resp.bytes().await else { continue };
+        let Ok(json) = serde_json::from_slice::<Value>(&bytes) else { continue };
+        if let Some(res) = parse_lyricsplus(&json, query.duration) {
+            return Some(res);
+        }
+        not_found_votes += 1;
+        if not_found_votes >= 2 {
+            break;
+        }
+    }
+    None
+}
+
+/// Разбор ответа LyricsPlus `/v2/lyrics/get` (`type: "Word" | "Line"`, `lyrics: [{time, duration, text, syllabus}]`).
+pub fn parse_lyricsplus(data: &Value, duration: f64) -> Option<(&'static str, &'static str, Vec<Line>)> {
+    let arr = get(data, "lyrics").as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let raw_src = {
+        let s = text_of(get(get(data, "metadata"), "source"));
+        if s.is_empty() { text_of(get(data, "source")) } else { s }
+    }
+    .to_lowercase();
+    let source_name = if raw_src.contains("apple") {
+        "Apple Music"
+    } else if raw_src.contains("musixmatch") {
+        "Musixmatch"
+    } else if raw_src.contains("spotify") {
+        "Spotify"
+    } else {
+        "LyricsPlus"
+    };
+
+    // В LyricsPlus время обычно в миллисекундах (например 17120), но если все метки < 1000 — уже в секундах.
+    let max_time = arr
+        .iter()
+        .filter_map(|ln| py_float(get(ln, "time"), "time").ok())
+        .fold(0.0_f64, f64::max);
+    let scale = if max_time >= 1000.0 { 0.001 } else { 1.0 };
+
+    let mut word_lines = Vec::new();
+    let mut timed_pairs: Vec<(f64, String)> = Vec::new();
+
+    for (idx, ln) in arr.iter().enumerate() {
+        let Ok(raw_t) = py_float(get(ln, "time"), "time") else { continue };
+        let line_t = raw_t * scale;
+        let line_dur = py_float(get(ln, "duration"), "duration").unwrap_or(0.0) * scale;
+        let next_t = arr
+            .get(idx + 1)
+            .and_then(|nxt| py_float(get(nxt, "time"), "time").ok())
+            .map(|v| v * scale)
+            .unwrap_or_else(|| if duration > line_t { duration } else { line_t + 5.0 });
+        let line_e = if line_dur > 0.0 { line_t + line_dur } else { (next_t - 0.05).max(line_t + 0.5) };
+
+        let syl_arr = get(ln, "syllabus")
+            .as_array()
+            .or_else(|| get(ln, "words").as_array())
+            .filter(|a| !a.is_empty());
+
+        if let Some(syl_arr) = syl_arr {
+            // Если в строке есть основные слоги (не фоновый вокал isBackground), пропускаем чисто фоновые дубли
+            let has_fg = syl_arr.iter().any(|s| !truthy(get(s, "isBackground")));
+            let filtered: Vec<&Value> = syl_arr
+                .iter()
+                .filter(|s| !has_fg || !truthy(get(s, "isBackground")))
+                .collect();
+
+            let mut raw_syls: Vec<(String, f64, f64)> = Vec::new();
+            for (si, s) in filtered.iter().enumerate() {
+                let txt = text_of(get(s, "text"));
+                if txt.is_empty() {
+                    continue;
+                }
+                let st = py_float(get(s, "time"), "time").map(|v| v * scale).unwrap_or(line_t);
+                let sd = py_float(get(s, "duration"), "duration").map(|v| v * scale).unwrap_or(0.0);
+                let se = if sd > 0.0 {
+                    st + sd
+                } else {
+                    filtered
+                        .get(si + 1)
+                        .and_then(|ns| py_float(get(ns, "time"), "time").ok())
+                        .map(|v| (v * scale).max(st + 0.01))
+                        .unwrap_or_else(|| line_e.max(st + 0.1))
+                };
+                if py_strip(txt).is_empty()
+                    && let Some(prev) = raw_syls.last_mut()
+                {
+                    prev.0.push_str(txt);
+                    prev.2 = prev.2.max(se);
+                } else {
+                    raw_syls.push((txt.to_owned(), st, se.max(st)));
+                }
+            }
+
+            // Если ни один элемент кроме последнего не заканчивается пробелом и это не CJK,
+            // значит провайдер прислал отдельные слова без пробелов — разделим их пробелами.
+            let any_boundary = raw_syls
+                .iter()
+                .take(raw_syls.len().saturating_sub(1))
+                .any(|(t, _, _)| t.chars().any(py_isspace) || ends_with_cjk(t));
+            if !any_boundary && raw_syls.len() > 1 {
+                let last_idx = raw_syls.len() - 1;
+                for (i, item) in raw_syls.iter_mut().enumerate() {
+                    if i < last_idx && !item.0.ends_with(' ') {
+                        item.0.push(' ');
+                    }
+                }
+            }
+
+            let joined: String = raw_syls.iter().map(|s| s.0.as_str()).collect();
+            let clean = py_strip(&joined);
+            if !clean.is_empty() && clean != "\u{266a}" && !is_meta_line(clean) {
+                let words = group_syllables(&raw_syls);
+                if let Some(last) = words.last() {
+                    let first_s = words.first().map(|w| w.s).unwrap_or(line_t);
+                    word_lines.push(Line::Words {
+                        t: round3(line_t.min(first_s)),
+                        e: round3(line_e.max(last.e)),
+                        w: words,
+                        i: false,
+                    });
+                }
+            }
+        }
+
+        let text = text_of(get(ln, "text")).split_whitespace().collect::<Vec<_>>().join(" ");
+        if !text.is_empty() && text != "\u{266a}" && !is_meta_line(&text) {
+            timed_pairs.push((line_t, text));
+        }
+    }
+
+    if !word_lines.is_empty() {
+        let texts: Vec<String> = word_lines.iter().map(Line::text).collect();
+        if !is_placeholder(texts.iter().map(String::as_str)) {
+            return Some((source_name, "word", word_lines));
+        }
+    }
+    if !timed_pairs.is_empty() && !is_placeholder(timed_pairs.iter().map(|(_, t)| t.as_str())) {
+        let lines = build_from_timed_lines(&timed_pairs, duration);
+        if !lines.is_empty() {
+            return Some((source_name, "line", lines));
+        }
+    }
+    None
 }
 
 // ── NetEase ──────────────────────────────────────────────────────────────────
@@ -633,6 +872,29 @@ mod tests {
         assert_eq!(w.iter().map(|w| w.x.as_str()).collect::<Vec<_>>(), vec!["Hello ", "world"]);
         assert_eq!(w[0].p, Some(vec![(3, 1.0, 1.5), (2, 1.5, 1.9)]));
         assert_eq!((w[1].s, w[1].e), (2.0, 3.0));
+    }
+
+    #[test]
+    fn lyricsplus_apple_syllables_become_words() {
+        let data = json!({
+            "type": "Word",
+            "metadata": { "source": "Apple" },
+            "lyrics": [{
+                "time": 1000,
+                "duration": 2000,
+                "text": "Hello world",
+                "syllabus": [
+                    { "time": 1000, "duration": 500, "text": "Hel" },
+                    { "time": 1500, "duration": 400, "text": "lo " },
+                    { "time": 2000, "duration": 1000, "text": "world" }
+                ]
+            }]
+        });
+        let (src, kind, lines) = parse_lyricsplus(&data, 180.0).unwrap();
+        assert_eq!((src, kind), ("Apple Music", "word"));
+        let Line::Words { t, e, w, i } = &lines[0] else { panic!() };
+        assert_eq!((*t, *e, *i), (1.0, 3.0, false));
+        assert_eq!(w.iter().map(|w| w.x.as_str()).collect::<Vec<_>>(), vec!["Hello ", "world"]);
     }
 
     #[test]

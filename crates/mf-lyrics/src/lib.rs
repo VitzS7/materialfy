@@ -1,8 +1,10 @@
-//! Синхронные тексты — порт lyrics_sources.py из yamusic-md3 (+ кэш из lyrics.py).
+//! Синхронные тексты — порт lyrics_sources.py из yamusic-md3 (+ кэш из lyrics.py) с расширенной
+//! цепочкой источников как в Spicy Lyrics:
 //!
-//! Цепочка источников (fetch): Spotify (внешний источник ExtraLrc — первым, как в spotifast; SYLLABLE_SYNCED —
-//! по словам из слогов ответа, LINE_SYNCED — построчно) → NetEase YRC
-//! (по словам) → Musixmatch richsync (по словам) → LRCLIB (строки) → Musixmatch subtitles → NetEase LRC.
+//! Цепочка источников (fetch): Spotify SYLLABLE_SYNCED (по словам из слогов) → AMLL TTML DB (сообщество,
+//! по Spotify track_id) → Apple Music / LyricsPlus (по словам из слогов TTML) → Spotify LINE_SYNCED →
+//! NetEase YRC (по словам) → Musixmatch richsync (по словам) → LRCLIB (Enhanced LRC по словам или строки) →
+//! AMLL / Apple Music / LyricsPlus (строки) → Musixmatch subtitles → NetEase LRC.
 //! У построчных текстов время слов интерполируется. Формат результата и кэша (JSON) — по ключам как в Python.
 pub mod lrc;
 pub mod sources;
@@ -18,7 +20,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use sha1::{Digest, Sha1};
 
-use crate::lrc::{add_gaps, build_from_timed_lines, group_syllables, lines_from_lrc, parse_yrc, round3};
+use crate::lrc::{add_gaps, build_from_timed_lines, group_syllables, lines_from_lrc, parse_elrc, parse_yrc, round3};
 use crate::text::{is_meta_line, is_placeholder};
 
 /// 4 — внешний LRC в конце цепочки; 5 — заглушки NetEase «текста нет» пропускаются;
@@ -89,7 +91,7 @@ impl Line {
 }
 
 /// Результат fetch и содержимое файла кэша:
-/// {"ok": true, "source": "Spotify"|"NetEase"|"Musixmatch"|"LRCLIB", "kind": "word"|"line", "lines": [...]}
+/// {"ok": true, "source": "Spotify"|"Apple Music"|"LyricsPlus"|"AMLL"|"NetEase"|"Musixmatch"|"LRCLIB", "kind": "word"|"line", "lines": [...]}
 /// или {"ok": false, "error": "not found", "details": ["источник: ошибка", …]}.
 /// Сериализация — вручную, ровно этими двумя формами (как dict в Python).
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -357,19 +359,23 @@ impl LyricsFetcher {
     pub async fn fetch(&self, query: &LyricsQuery, mxm_user_token: &str, extra: Option<ExtraLrc>) -> LyricsResult {
         let duration = query.duration;
         let mut errors = Vec::new();
+        let mut spotify_line = Vec::new();
 
-        // 0. Spotify — первым: это текст именно этой записи
+        // 0. Spotify — первым: если есть SYLLABLE_SYNCED (по словам), отдаём сразу;
+        // если только LINE_SYNCED (построчно), при наличии исполнителя проверяем послоговые базы AMLL и Apple Music.
         if let Some(extra) = extra {
             let json = attempt(&mut errors, "spotify", extra().await).flatten();
             if let Some(json) = json {
-                // SYLLABLE_SYNCED — время слов из слогов; LINE_SYNCED — построчно с интерполяцией
                 if let Some(lines) = lines_from_spotify(&json) {
                     return LyricsResult::found(EXTRA_SOURCE, "word", lines);
                 }
                 if let Some(lrc) = lrc_from_spotify(&json).filter(|l| !l.is_empty()) {
                     let lines = build_from_timed_lines(&lines_from_lrc(&lrc), duration);
                     if !lines.is_empty() {
-                        return LyricsResult::found(EXTRA_SOURCE, "line", lines);
+                        if query.artist.trim().is_empty() {
+                            return LyricsResult::found(EXTRA_SOURCE, "line", lines);
+                        }
+                        spotify_line = lines;
                     }
                 }
             }
@@ -378,13 +384,39 @@ impl LyricsFetcher {
         let http = match (self.http)() {
             Ok(http) => http,
             Err(e) => {
+                if !spotify_line.is_empty() {
+                    return LyricsResult::found(EXTRA_SOURCE, "line", spotify_line);
+                }
                 errors.push(format!("network: {e}"));
                 return LyricsResult::not_found(errors);
             }
         };
         let http = &http;
 
-        // 1. NetEase YRC (по словам)
+        // 1. База сообщества AMLL TTML DB по точному Spotify track_id (.ttml / .yrc)
+        let mut amll_line = Vec::new();
+        if let Some((kind, lines)) = sources::amll_fetch(http, &query.track_id, duration).await {
+            if kind == "word" {
+                return LyricsResult::found("AMLL", "word", lines);
+            }
+            amll_line = lines;
+        }
+
+        // 2. Apple Music / LyricsPlus (агрегатор Kpoe v2: TTML Apple Music и база сообщества LyricsPlus)
+        let mut lp_line: Option<(&'static str, Vec<Line>)> = None;
+        if let Some((src, kind, lines)) = sources::lyricsplus_fetch(http, query).await {
+            if kind == "word" {
+                return LyricsResult::found(src, "word", lines);
+            }
+            lp_line = Some((src, lines));
+        }
+
+        // Если Spotify дал построчный текст, а в AMLL / Apple Music послоговой разметки не нашлось — берём Spotify
+        if !spotify_line.is_empty() {
+            return LyricsResult::found(EXTRA_SOURCE, "line", spotify_line);
+        }
+
+        // 3. NetEase YRC (по словам)
         let mut ne_data = None;
         if let Some(song) = attempt(&mut errors, "netease-search", sources::ne_search(http, query).await).flatten() {
             tracing::debug!("lyrics: netease match {} {}", song["id"], song["name"]);
@@ -405,7 +437,7 @@ impl LyricsFetcher {
             }
         }
 
-        // 2. Musixmatch richsync (по словам) — заодно даёт построчный запасной вариант
+        // 4. Musixmatch richsync (по словам) — заодно даёт построчный запасной вариант
         let mut mxm_line = Vec::new();
         let token = sources::mxm_token(http, &self.cache_dir, mxm_user_token).await;
         let token = attempt(&mut errors, "musixmatch-token", token).flatten().filter(|t| !t.is_empty());
@@ -417,23 +449,42 @@ impl LyricsFetcher {
             }
         }
 
-        // 3. LRCLIB (по строкам, интерполяция)
+        // 5. LRCLIB (Enhanced LRC по словам или построчно с интерполяцией)
         let lrc = attempt(&mut errors, "lrclib", sources::lrclib_fetch(http, query).await).flatten();
         if let Some(lrc) = lrc.filter(|l| !l.is_empty()) {
+            if let Some(word_lines) = parse_elrc(&lrc, duration) {
+                return LyricsResult::found("LRCLIB", "word", word_lines);
+            }
             let lines = build_from_timed_lines(&lines_from_lrc(&lrc), duration);
             if !lines.is_empty() {
                 return LyricsResult::found("LRCLIB", "line", lines);
             }
         }
 
-        // 4. Musixmatch subtitles
+        // 6. Построчные запасные варианты из AMLL и Apple Music / LyricsPlus
+        if !amll_line.is_empty() {
+            return LyricsResult::found("AMLL", "line", amll_line);
+        }
+        if let Some((src, lines)) = lp_line
+            && !lines.is_empty()
+        {
+            return LyricsResult::found(src, "line", lines);
+        }
+
+        // 7. Musixmatch subtitles
         if !mxm_line.is_empty() {
             return LyricsResult::found("Musixmatch", "line", mxm_line);
         }
 
-        // 5. NetEase LRC
+        // 8. NetEase LRC
         let ne_lrc = ne_data.as_ref().and_then(|d| d.get("lrc")?.get("lyric")?.as_str()).unwrap_or("");
         if !ne_lrc.is_empty() {
+            if let Some(word_lines) = parse_elrc(ne_lrc, duration) {
+                let texts: Vec<String> = word_lines.iter().map(Line::text).collect();
+                if !is_placeholder(texts.iter().map(String::as_str)) {
+                    return LyricsResult::found("NetEase", "word", word_lines);
+                }
+            }
             let pairs = lines_from_lrc(ne_lrc);
             if !is_placeholder(pairs.iter().map(|(_, t)| t.as_str())) {
                 let lines = build_from_timed_lines(&pairs, duration);
