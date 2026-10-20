@@ -21,26 +21,30 @@ Item {
         showSource: false
     }
 
-    // The first layout runs before the word delegates exist; nudge it once they are up.
-    Timer {
-        interval: 350
-        running: true
-        onTriggered: view.layoutRevision++
-    }
-    Timer {
-        interval: 900
-        running: true
-        onTriggered: view.layoutRevision++
+    // Runs only while the card is really on screen (the Settings page is kept alive by the router).
+    // FrameAnimation + elapsed wall time keeps the wave smooth on 120/144 Hz displays too.
+    property real _lastTick: 0
+    readonly property bool onScreen: {
+        let item = root
+        while (item) {
+            if (!item.visible)
+                return false
+            item = item.parent
+        }
+        return true
     }
 
-    Timer {
-        interval: 33
-        repeat: true
-        running: true
+    FrameAnimation {
+        running: root.onScreen && view.live
         onTriggered: {
-            root.position += 0.033
-            if (root.position > 11.8)
+            const now = Date.now()
+            const dt = root._lastTick > 0 ? Math.min(0.1, (now - root._lastTick) / 1000) : 0.016
+            root._lastTick = now
+            root.position += dt
+            if (root.position > 11.8) {
                 root.position = 0
+                view.layoutRevision++
+            }
             view.tick()
         }
     }

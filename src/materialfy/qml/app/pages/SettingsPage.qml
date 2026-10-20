@@ -1012,9 +1012,8 @@ Page {
             Layout.fillWidth: true
             implicitHeight: preview.implicitHeight + 28
             radius: Theme.shape.large
-            color: Settings.lyricsScrim === "strong" ? Qt.rgba(Theme.surfaceContainerLowest.r, Theme.surfaceContainerLowest.g, Theme.surfaceContainerLowest.b, 0.75)
-                 : Settings.lyricsScrim === "soft" ? Qt.rgba(Theme.surfaceContainerLowest.r, Theme.surfaceContainerLowest.g, Theme.surfaceContainerLowest.b, 0.4)
-                 : "transparent"
+            // The mounted view paints the scrim itself; tinting the card too would double it.
+            color: "transparent"
             border.width: 1
             border.color: Theme.outlineVariant
 

@@ -195,6 +195,8 @@ Item {
             jumpTimer.restart()               // пока строится — без каскада прокрутки
             if (root._built >= root._lines.length) {
                 running = false
+                // Слова существуют только теперь: будим раскладку, иначе все они стоят в x=0.
+                root.layoutRevision++
                 root.tick()
             }
         }
@@ -224,7 +226,7 @@ Item {
     // То же, пока трек ещё грузится: «играет» в это время оптимистично, а звука нет.
     readonly property bool advancing: Player.playing && !Player.narrating && !Player.buffering
     property bool _wasPlaying: advancing
-    onAdvancingChanged: resyncPlayback()
+    onAdvancingChanged: if (!previewMode) resyncPlayback()
 
     function rawPlayerPos() {
         if (!_wasPlaying)
