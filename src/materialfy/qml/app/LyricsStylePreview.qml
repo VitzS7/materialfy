@@ -21,13 +21,25 @@ Item {
         showSource: false
     }
 
+    // The first layout runs before the word delegates exist; nudge it once they are up.
+    Timer {
+        interval: 350
+        running: true
+        onTriggered: view.layoutRevision++
+    }
+    Timer {
+        interval: 900
+        running: true
+        onTriggered: view.layoutRevision++
+    }
+
     Timer {
         interval: 33
         repeat: true
         running: true
         onTriggered: {
             root.position += 0.033
-            if (root.position > 7.4)
+            if (root.position > 11.8)
                 root.position = 0
             view.tick()
         }
@@ -64,6 +76,25 @@ Item {
                 { x: "night ", s: 6.35, e: 6.85 },
                 { x: "and ", s: 6.85, e: 7.1 },
                 { x: "day", s: 7.1, e: 7.4 }
+            ]
+        },
+        {
+            t: 7.4, e: 9.6, i: false,
+            w: [
+                { x: "A ", s: 7.4, e: 7.6 },
+                { x: "melody ", s: 7.6, e: 8.25, p: [[3, 7.6, 7.85], [3, 7.85, 8.25]] },
+                { x: "that ", s: 8.25, e: 8.6 },
+                { x: "never ", s: 8.6, e: 9.1 },
+                { x: "fades", s: 9.1, e: 9.6 }
+            ]
+        },
+        {
+            t: 9.6, e: 11.8, i: false,
+            w: [
+                { x: "It ", s: 9.6, e: 9.9 },
+                { x: "carries ", s: 9.9, e: 10.5 },
+                { x: "us ", s: 10.5, e: 10.9 },
+                { x: "away", s: 10.9, e: 11.8 }
             ]
         }
     ]

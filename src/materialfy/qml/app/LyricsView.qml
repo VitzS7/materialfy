@@ -104,6 +104,9 @@ Item {
 
     property real pos: 0
     property int activeIndex: -1
+    // Forces a re-layout of the words: the preview sets its lines before the delegates exist,
+    // and the layout binding cannot see their implicit widths until something wakes it.
+    property int layoutRevision: 0
     property int _targetScrollIndex: -1
     readonly property int scrollIndex: _targetScrollIndex
 
@@ -845,6 +848,7 @@ Item {
             // Перенос слов по строкам с поддержкой выравнивания влево, по центру и вправо.
             // Так как на активной строке lineScale == 1.0, доступная ширина равна полной ширине колонки!
             readonly property var layout: {
+                const revision = root.layoutRevision
                 const n = wordRep.count
                 const avail = Math.max(1, width)
                 const pos = []
