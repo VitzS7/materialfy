@@ -364,5 +364,7 @@
   "Cascade delay": "Atraso da cascata",
   "{0} ms between neighbouring lines; 0 moves the whole block together": "{0} ms entre linhas vizinhas; 0 move o bloco todo junto",
   "Inactive lines size": "Tamanho das linhas inativas",
-  "{0}%: how much the lines around the singing one stay smaller": "{0}%: quanto as linhas ao redor da que está cantando ficam menores"
+  "{0}%: how much the lines around the singing one stay smaller": "{0}%: quanto as linhas ao redor da que está cantando ficam menores",
+  "Interface scale": "Escala da interface",
+  "Size of text and controls. Takes effect after restarting the app": "Tamanho do texto e dos controles. Aplica-se após reiniciar o aplicativo"
 }

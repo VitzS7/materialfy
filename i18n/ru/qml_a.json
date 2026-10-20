@@ -364,5 +364,7 @@
   "Cascade delay": "Задержка каскада",
   "{0} ms between neighbouring lines; 0 moves the whole block together": "{0} мс между соседними строками; 0 перемещает весь блок вместе",
   "Inactive lines size": "Размер неактивных строк",
-  "{0}%: how much the lines around the singing one stay smaller": "{0}%: насколько строки вокруг поющейся остаются меньше"
+  "{0}%: how much the lines around the singing one stay smaller": "{0}%: насколько строки вокруг поющейся остаются меньше",
+  "Interface scale": "Масштаб интерфейса",
+  "Size of text and controls. Takes effect after restarting the app": "Размер текста и элементов. Применяется после перезапуска приложения"
 }

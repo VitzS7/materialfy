@@ -82,6 +82,8 @@ pub enum SettingKey {
     GpuPreference,
     /// язык интерфейса: "system" (как в ОС) | "en" | "ru" | "pt" (mf_i18n::parse_setting); меняется на лету
     Language,
+    /// масштаб интерфейса в процентах: 75 | 100 | 125 | 150 | 200 (QT_SCALE_FACTOR, после перезапуска)
+    UiScale,
     // Раскладка
     RightPanelOpen,
     RightPanelTab,
@@ -183,7 +185,7 @@ pub enum SettingType {
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 81] = [
+    pub const ALL: [SettingKey; 82] = [
         SettingKey::ThemeMode,
         SettingKey::SchemeVariant,
         SettingKey::AccentFromCover,
@@ -219,6 +221,7 @@ impl SettingKey {
         SettingKey::LowPowerMode,
         SettingKey::GpuPreference,
         SettingKey::Language,
+        SettingKey::UiScale,
         SettingKey::RightPanelOpen,
         SettingKey::RightPanelTab,
         SettingKey::SidebarCollapsed,
@@ -306,6 +309,7 @@ impl SettingKey {
             LowPowerMode => "lowPowerMode",
             GpuPreference => "gpuPreference",
             Language => "language",
+            UiScale => "uiScale",
             RightPanelOpen => "rightPanelOpen",
             RightPanelTab => "rightPanelTab",
             SidebarCollapsed => "sidebarCollapsed",
@@ -407,6 +411,7 @@ impl SettingKey {
             LowPowerMode => Str("auto".into()),
             GpuPreference => Str("auto".into()),
             Language => Str("system".into()),
+            UiScale => Int(100),
             RightPanelOpen => Bool(false),
             RightPanelTab => Str("queue".into()),
             SidebarCollapsed => Bool(false),
@@ -507,6 +512,16 @@ impl SettingKey {
             }
             (SettingKey::LyricsSyncMs, SettingValue::Int(ms)) => {
                 SettingValue::Int(ms.clamp(-500, 500))
+            }
+            (SettingKey::UiScale, SettingValue::Int(percent)) => {
+                // пресеты из настроек; значение из конфига вне пресетов — ближайший
+                let percent = percent.clamp(50, 250);
+                SettingValue::Int(
+                    [75i64, 100, 125, 150, 200]
+                        .into_iter()
+                        .min_by_key(|preset| (preset - percent).abs())
+                        .unwrap_or(100),
+                )
             }
             (SettingKey::LyricsTextAlign, SettingValue::Str(s)) => {
                 SettingValue::Str(match s.as_str() {
@@ -1183,7 +1198,7 @@ mod tests {
 
     #[test]
     fn schema() {
-        assert_eq!(SettingKey::ALL.len(), 81);
+        assert_eq!(SettingKey::ALL.len(), 82);
         for key in SettingKey::ALL {
             assert_eq!(SettingKey::from_name(key.name()), Some(key));
             assert_eq!(key.default_value().value_type(), key.value_type());
@@ -1201,6 +1216,11 @@ mod tests {
         assert_eq!(SettingKey::PlaybackSpeed.normalize(Float(f64::NAN)), Float(1.0));
         assert_eq!(SettingKey::Crossfade.normalize(Int(-3)), Int(0));
         assert_eq!(SettingKey::Crossfade.normalize(Int(40)), Int(CROSSFADE_MAX_S));
+        assert_eq!(SettingKey::UiScale.normalize(Int(100)), Int(100));
+        assert_eq!(SettingKey::UiScale.normalize(Int(110)), Int(100));
+        assert_eq!(SettingKey::UiScale.normalize(Int(120)), Int(125));
+        assert_eq!(SettingKey::UiScale.normalize(Int(1)), Int(75));
+        assert_eq!(SettingKey::UiScale.normalize(Int(900)), Int(200));
         assert_eq!(SettingKey::LyricsTextAlign.normalize(Str("auto".into())), Str("left".into()));
         assert_eq!(SettingKey::LyricsTextAlign.normalize(Str("center".into())), Str("center".into()));
         assert_eq!(SettingKey::LyricsTextAlign.normalize(Str("right".into())), Str("right".into()));
@@ -1528,7 +1548,7 @@ mod tests {
             "taskbarWidgetPos", "floatingKeyHints", "libraryView",
             "librarySort", "homeHidden", "bitrate", "normalisation", "gapless", "autoplay", "volume", "audioDevice",
             "audioCache", "audioCacheMb", "playbackAuthorized", "deviceName", "webClientId", "apiLimitTipDismissed", "proxyMode", "proxyHost",
-            "proxyPort", "proxyUsername", "coversBypassProxy", "pins", "hiddenTracks", "radioSeeds", "language", "autoUpdateCheck",
+            "proxyPort", "proxyUsername", "coversBypassProxy", "pins", "hiddenTracks", "radioSeeds", "language", "uiScale", "autoUpdateCheck",
             "updateChannel", "skippedVersion",
         ] {
             assert!(names.contains(&name), "{name}");

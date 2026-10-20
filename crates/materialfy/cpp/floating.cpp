@@ -434,9 +434,11 @@ move_window(QWindow* window, HWND hwnd, const Bar& bar, bool embed, LONG x, int 
 }
 
 int
-size_h(const Bar& bar, int height)
+size_h(const Bar& bar, int height, double scale)
 {
-  return std::min(px(height, bar.scale), static_cast<int>(bar.rect.bottom - bar.rect.top) - 2 * px(4, bar.scale));
+  // Высота окна — в его собственных физических пикселях (devicePixelRatio уже включает масштаб
+  // интерфейса), а предел по высоте панели — в пикселях панели (bar.scale).
+  return std::min(px(height, scale), static_cast<int>(bar.rect.bottom - bar.rect.top) - 2 * px(4, bar.scale));
 }
 
 // Перетаскивание: где схватили (от левого края окна) и места на панели — на всё время перетаскивания
@@ -665,8 +667,9 @@ floating_taskbar_place(QObject* object, int width, int height, bool embed, const
     release_host(window);
     return 0;
   }
-  const int w = px(width, bar.scale);
-  const int h = size_h(bar, height);
+  const double scale = window->devicePixelRatio();
+  const int w = px(width, scale);
+  const int h = size_h(bar, height, scale);
   // кнопки панели нужны только местам у значков и у левого края — у трея хватает TrayNotifyWnd
   const Places p = places(bar, w, pos != QLatin1String("tray"));
   if (h <= 0 || p.hi < p.lo) {
@@ -696,7 +699,8 @@ floating_taskbar_drag(QObject* object, int width, int height, int phase)
   RECT now{};
   if (!hwnd || !IsWindow(hwnd) || !read_bar(window, bar) || !GetCursorPos(&cursor) || !GetWindowRect(hwnd, &now))
     return {};
-  const int w = px(width, bar.scale);
+  const double scale = window->devicePixelRatio();
+  const int w = px(width, scale);
   if (phase == 0) {
     drag.grab = cursor.x - now.left;
     drag.places = places(bar, w, true);
@@ -719,7 +723,7 @@ floating_taskbar_drag(QObject* object, int width, int height, int phase)
     x = position_x(p, pos);
   else
     pos = QString::number(p.hi > p.lo ? double(x - p.lo) / double(p.hi - p.lo) : 1.0, 'f', 4);
-  move_window(window, hwnd, bar, drag.embed, x, w, size_h(bar, height));
+  move_window(window, hwnd, bar, drag.embed, x, w, size_h(bar, height, scale));
   return pos;
 }
 

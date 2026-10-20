@@ -632,6 +632,18 @@ Page {
         }
 
         SettingRow {
+            title: I18n.t("Interface scale")
+            description: I18n.t("Size of text and controls. Takes effect after restarting the app")
+            ButtonGroup {
+                model: ["75%", "100%", "125%", "150%", "200%"]
+                autoSelect: false
+                size: page.compact ? "xs" : "s"
+                currentIndex: Math.max(0, [75, 100, 125, 150, 200].indexOf(Settings.uiScale))
+                onActivated: i => Settings.uiScale = [75, 100, 125, 150, 200][i]
+            }
+        }
+
+        SettingRow {
             title: I18n.t("Color from cover")
             description: I18n.t("The app recolors to match the playing track’s cover")
             Switch { checked: Settings.accentFromCover; onToggled: c => Settings.accentFromCover = c }

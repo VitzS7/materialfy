@@ -71,6 +71,8 @@ pub mod qobject {
         #[qproperty(QString, gpu_preference, cxx_name = "gpuPreference", READ, WRITE = set_gpu_preference, NOTIFY = gpu_preference_changed)]
         /// "system" | "en" | "ru" | "pt"; the applied language and the dictionary — Translations (Md3/I18n.qml)
         #[qproperty(QString, language, READ, WRITE = set_language, NOTIFY = language_changed)]
+        /// 75 | 100 | 125 | 150 | 200 — QT_SCALE_FACTOR, after a restart
+        #[qproperty(i32, ui_scale, cxx_name = "uiScale", READ, WRITE = set_ui_scale, NOTIFY = ui_scale_changed)]
         #[qproperty(bool, right_panel_open, cxx_name = "rightPanelOpen", READ, WRITE = set_right_panel_open, NOTIFY = right_panel_open_changed)]
         #[qproperty(QString, right_panel_tab, cxx_name = "rightPanelTab", READ, WRITE = set_right_panel_tab, NOTIFY = right_panel_tab_changed)]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed", READ, WRITE = set_sidebar_collapsed, NOTIFY = sidebar_collapsed_changed)]
@@ -166,6 +168,7 @@ pub mod qobject {
         fn set_low_power_mode(self: Pin<&mut Settings>, value: QString);
         fn set_gpu_preference(self: Pin<&mut Settings>, value: QString);
         fn set_language(self: Pin<&mut Settings>, value: QString);
+        fn set_ui_scale(self: Pin<&mut Settings>, value: i32);
         fn set_right_panel_open(self: Pin<&mut Settings>, value: bool);
         fn set_right_panel_tab(self: Pin<&mut Settings>, value: QString);
         fn set_sidebar_collapsed(self: Pin<&mut Settings>, value: bool);
@@ -308,6 +311,9 @@ pub mod qobject {
         #[qsignal]
         #[cxx_name = "languageChanged"]
         fn language_changed(self: Pin<&mut Settings>);
+        #[qsignal]
+        #[cxx_name = "uiScaleChanged"]
+        fn ui_scale_changed(self: Pin<&mut Settings>);
         #[qsignal]
         #[cxx_name = "rightPanelOpenChanged"]
         fn right_panel_open_changed(self: Pin<&mut Settings>);
@@ -640,6 +646,7 @@ settings! {
     low_power_mode: QString = LowPowerMode, set_low_power_mode, low_power_mode_changed;
     gpu_preference: QString = GpuPreference, set_gpu_preference, gpu_preference_changed;
     language: QString = Language, set_language, language_changed;
+    ui_scale: i32 = UiScale, set_ui_scale, ui_scale_changed;
     right_panel_open: bool = RightPanelOpen, set_right_panel_open, right_panel_open_changed;
     right_panel_tab: QString = RightPanelTab, set_right_panel_tab, right_panel_tab_changed;
     sidebar_collapsed: bool = SidebarCollapsed, set_sidebar_collapsed, sidebar_collapsed_changed;
