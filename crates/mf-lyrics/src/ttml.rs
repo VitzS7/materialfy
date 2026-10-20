@@ -35,12 +35,16 @@ pub fn parse_ttml(xml: &str) -> Option<(Vec<Line>, bool)> {
 
 fn xml_text(reader: &mut Reader<&[u8]>) -> Option<(Vec<Line>, bool)> {
     let mut lines = Vec::new();
+    let mut background: Vec<(f64, f64, Vec<Word>)> = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut segments: Vec<Segment> = Vec::new();
+    let mut bg_segments: Vec<Segment> = Vec::new();
     let mut in_line = false;
     let mut line_begin: Option<f64> = None;
     let mut line_end: Option<f64> = None;
     let mut line_bg = false;
+    let mut agent: Option<String> = None;
+    let mut last_bg = false;
     let mut any_word_timing = false;
 
     loop {
@@ -54,8 +58,11 @@ fn xml_text(reader: &mut Reader<&[u8]>) -> Option<(Vec<Line>, bool)> {
                     line_begin = attr(&e, b"begin").as_deref().and_then(parse_time);
                     line_end = attr(&e, b"end").as_deref().and_then(parse_time);
                     line_bg = attr(&e, b"role").as_deref() == Some("x-bg");
+                    agent = attr(&e, b"agent").filter(|value| !value.is_empty());
                     segments.clear();
+                    bg_segments.clear();
                     spans.clear();
+                    last_bg = false;
                 }
                 b"span" if in_line => {
                     let parent_bg = spans.last().is_some_and(|span| span.bg);
@@ -74,28 +81,46 @@ fn xml_text(reader: &mut Reader<&[u8]>) -> Option<(Vec<Line>, bool)> {
             },
             Ok(Event::Text(text)) => {
                 if let Some(value) = decoded(&text) {
-                    append(&mut spans, &mut segments, &value);
+                    append(&mut spans, &mut segments, &mut bg_segments, last_bg, &value);
                 }
             }
             Ok(Event::GeneralRef(reference)) => {
                 if let Some(value) = reference_char(&reference) {
-                    append(&mut spans, &mut segments, &value.to_string());
+                    append(&mut spans, &mut segments, &mut bg_segments, last_bg, &value.to_string());
                 }
             }
             Ok(Event::End(e)) => match e.local_name().as_ref() {
                 b"span" if in_line => {
                     let span = spans.pop()?;
-                    if !span.has_child && !span.text.is_empty() && !span.bg {
-                        segments.push(Segment { text: span.text, begin: span.begin, end: span.end });
+                    last_bg = span.bg;
+                    if !span.has_child && !span.text.is_empty() {
+                        let segment = Segment { text: span.text, begin: span.begin, end: span.end };
+                        if span.bg {
+                            bg_segments.push(segment);
+                        } else {
+                            segments.push(segment);
+                        }
                     }
                 }
                 b"p" if in_line => {
-                    if let Some(line) = build_line(&segments, line_begin, line_end, line_bg) {
+                    if line_bg {
+                        // every span of an x-bg <p> is background, regardless of its own role
+                        if let Some(words) = build_words(&segments, line_begin, line_end) {
+                            let from = line_begin.unwrap_or_else(|| words.first().map_or(0.0, |word| word.s));
+                            let to = line_end.unwrap_or_else(|| words.last().map_or(from, |word| word.e));
+                            background.push((from, to, words));
+                        }
+                    } else if let Some(words) = build_words(&segments, line_begin, line_end) {
+                        let bg = build_words(&bg_segments, line_begin, line_end);
+                        let t = round3(line_begin.unwrap_or(words[0].s));
+                        let e = round3(line_end.unwrap_or(words[words.len() - 1].e).max(t));
+                        let line = Line::Words { t, e, w: words, i: false, bg, agent: agent.take() };
                         any_word_timing |= has_word_timing(&line);
                         lines.push(line);
                     }
                     in_line = false;
                     segments.clear();
+                    bg_segments.clear();
                     spans.clear();
                 }
                 _ => {}
@@ -106,21 +131,48 @@ fn xml_text(reader: &mut Reader<&[u8]>) -> Option<(Vec<Line>, bool)> {
         }
     }
 
+    attach_background(&mut lines, background);
     (!lines.is_empty()).then_some((lines, any_word_timing))
 }
 
-fn append(spans: &mut [Span], segments: &mut [Segment], text: &str) {
+/// A background line (`x-bg`) belongs to the lead line it overlaps in time; without an
+/// overlap there is nothing to put it under, so it is dropped.
+fn attach_background(lines: &mut [Line], background: Vec<(f64, f64, Vec<Word>)>) {
+    for (from, to, words) in background {
+        let mut best: Option<(usize, f64)> = None;
+        for (index, line) in lines.iter().enumerate() {
+            if let Line::Words { t, e, .. } = line {
+                let overlap = to.min(*e) - from.max(*t);
+                if overlap > 0.0 && best.map_or(true, |(_, best)| overlap > best) {
+                    best = Some((index, overlap));
+                }
+            }
+        }
+        let Some((index, _)) = best else { continue };
+        if let Line::Words { bg, .. } = &mut lines[index] {
+            let mut merged = bg.take().unwrap_or_default();
+            merged.extend(words);
+            merged.sort_by(|a, b| a.s.partial_cmp(&b.s).unwrap_or(std::cmp::Ordering::Equal));
+            *bg = Some(merged);
+        }
+    }
+}
+
+fn append(spans: &mut [Span], segments: &mut [Segment], background: &mut [Segment], last_bg: bool, text: &str) {
     if let Some(span) = spans.last_mut() {
         span.text.push_str(text);
-    } else if let Some(segment) = segments.last_mut() {
+    } else {
         // между <span> в TTML лежит или разделитель-пробел, или форматирование XML
         // (переводы строк и отступы): форматирование в текст песни не попадает.
-        if text.chars().all(char::is_whitespace) {
-            if text == " " {
-                segment.text.push(' ');
+        let target = if last_bg { background } else { segments };
+        if let Some(segment) = target.last_mut() {
+            if text.chars().all(char::is_whitespace) {
+                if text == " " {
+                    segment.text.push(' ');
+                }
+            } else {
+                segment.text.push_str(text);
             }
-        } else {
-            segment.text.push_str(text);
         }
     }
 }
@@ -152,7 +204,7 @@ fn attr(element: &BytesStart, name: &[u8]) -> Option<String> {
     None
 }
 
-/// `HH:MM:SS.mmm`, `MM:SS.mmm`, `SS.mmm`, с необязательной `s`/`ms` в конце.
+/// `HH:MM:SS.mmm`, `MM:SS.mmm`, `SS.mmm`, with an optional `s`/`ms` suffix.
 fn parse_time(raw: &str) -> Option<f64> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -171,7 +223,7 @@ fn parse_time(raw: &str) -> Option<f64> {
     };
     let parts: Vec<&str> = clock.split(':').collect();
     if parts.is_empty() || parts.len() > 3 {
-        return None; // кадры (HH:MM:SS:FF) не поддерживаются
+        return None; // frames (HH:MM:SS:FF) are not supported
     }
     let mut seconds = 0.0;
     for (index, part) in parts.iter().rev().enumerate() {
@@ -184,8 +236,8 @@ fn parse_time(raw: &str) -> Option<f64> {
     seconds.is_finite().then_some(seconds * scale)
 }
 
-fn build_line(segments: &[Segment], begin: Option<f64>, end: Option<f64>, bg: bool) -> Option<Line> {
-    if bg || segments.is_empty() {
+fn build_words(segments: &[Segment], begin: Option<f64>, end: Option<f64>) -> Option<Vec<Word>> {
+    if segments.is_empty() {
         return None;
     }
     let fallback_start = begin.unwrap_or(0.0);
@@ -248,12 +300,7 @@ fn build_line(segments: &[Segment], begin: Option<f64>, end: Option<f64>, bg: bo
             p: (parts.len() > 1).then_some(parts),
         });
     }
-    if words.is_empty() {
-        return None;
-    }
-    let t = round3(begin.unwrap_or(words[0].s));
-    let e = round3(end.unwrap_or(words[words.len() - 1].e).max(t));
-    Some(Line::Words { t, e, w: words, i: false })
+    (!words.is_empty()).then_some(words)
 }
 
 fn has_word_timing(line: &Line) -> bool {
@@ -291,7 +338,7 @@ mod tests {
         let (lines, word_timing) = parse_ttml(SAMPLE).expect("ttml");
         assert!(word_timing);
         assert_eq!(lines.len(), 2, "the x-bg line is skipped");
-        let Line::Words { t, e, w, i } = &lines[0] else { panic!("words") };
+        let Line::Words { t, e, w, i, .. } = &lines[0] else { panic!("words") };
         assert_eq!((*t, *e), (10.0, 12.5));
         assert!(!i);
         assert_eq!(w.len(), 1);
@@ -311,6 +358,25 @@ mod tests {
         assert_eq!((w[0].x.as_str(), w[0].s, w[0].e), ("one ", 15.0, 15.5));
         assert_eq!((w[1].x.as_str(), w[1].s, w[1].e), ("two", 15.5, 16.0));
         assert!(w.iter().all(|word| word.p.is_none()), "one span per word");
+    }
+
+    #[test]
+    fn background_and_duet_are_attached() {
+        let xml = r#"<tt><body><div>
+          <p begin="1.0" end="4.0" ttm:agent="v1"><span begin="1.0" end="2.0">main</span></p>
+          <p begin="1.5" end="3.0" ttm:role="x-bg"><span begin="1.5" end="2.5">echo</span></p>
+          <p begin="4.0" end="6.0" ttm:agent="v2"><span begin="4.0" end="5.0">answer</span></p>
+        </div></body></tt>"#;
+        let (lines, _) = parse_ttml(xml).expect("ttml");
+        assert_eq!(lines.len(), 2, "the x-bg line is merged, not a row");
+        let Line::Words { bg, agent, .. } = &lines[0] else { panic!("words") };
+        assert_eq!(agent.as_deref(), Some("v1"));
+        assert_eq!(
+            bg.as_ref().map(|words| words.iter().map(|word| word.x.as_str()).collect::<Vec<_>>()),
+            Some(vec!["echo"])
+        );
+        let Line::Words { agent, .. } = &lines[1] else { panic!("words") };
+        assert_eq!(agent.as_deref(), Some("v2"));
     }
 
     #[test]
