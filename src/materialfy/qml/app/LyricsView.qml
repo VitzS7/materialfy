@@ -676,6 +676,8 @@ Item {
         }
         readonly property real lineSize: root.activeFontPx
         readonly property real rowH: root.rowH
+        // Bumped as each word delegate appears: the layout needs their real widths.
+        property int layoutRevision: 0
 
         // Фильтр видимости строк (ползунок от 1 до 15 / Все)
         readonly property bool inLineRange: {
@@ -850,7 +852,7 @@ Item {
             // Перенос слов по строкам с поддержкой выравнивания влево, по центру и вправо.
             // Так как на активной строке lineScale == 1.0, доступная ширина равна полной ширине колонки!
             readonly property var layout: {
-                const revision = root.layoutRevision
+                const revision = root.layoutRevision + line.layoutRevision
                 const n = wordRep.count
                 const avail = Math.max(1, width)
                 const pos = []
@@ -899,6 +901,7 @@ Item {
                 Repeater {
                     id: wordRep
                     model: line.isGap ? [] : line.modelData.w
+                    onItemAdded: line.layoutRevision++
                     delegate: LyricWord {
                         lineActive: line.filling
                         lineOutgoing: line.isOutgoing
