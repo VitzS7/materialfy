@@ -80,12 +80,16 @@ Item {
     property color textColor: Theme.fgSurface
     property int resumeMs: 3000
 
-    readonly property var lines: Lyrics.lines
+    // Превью в настройках — тот же вид, но со своими строками и часами; обычный путь не меняется.
+    property bool previewMode: false
+    property var previewLines: []
+    property real previewPos: 0
+    readonly property var lines: previewMode ? previewLines : Lyrics.lines
     // Трек уже сменился, а текст ещё от прошлого: гасим и не обрабатываем (иначе позиция 0 запускает
     // каскад прокрутки по всем строкам старого текста — несколько тяжёлых кадров подряд).
-    readonly property bool stale: Lyrics.trackId !== Player.trackId
+    readonly property bool stale: !previewMode && Lyrics.trackId !== Player.trackId
     readonly property bool live: visible && !stale && lines.length > 0
-    onLiveChanged: if (live) { jumpTimer.restart(); sync(Player.positionMs / 1000); tick() }
+    onLiveChanged: if (live && !previewMode) { jumpTimer.restart(); sync(Player.positionMs / 1000); tick() }
 
     // Шрифт изначально растеризуется в полном размере активной строки (fontSize * activeScale):
     // тогда у активной строки масштаб слоя равен ровно 1.0 (100% нативная резкость пикселей без мыла),
@@ -249,7 +253,7 @@ Item {
     Connections {
         target: Player
         function onPositionChanged() {
-            if (!root.live)
+            if (!root.live || root.previewMode)
                 return
             const now = Date.now()
             const measured = Player.positionMs / 1000
@@ -269,7 +273,7 @@ Item {
             }
             root.tick()
         }
-        function onStateChanged() { root.resyncPlayback() }
+        function onStateChanged() { if (!root.previewMode) root.resyncPlayback() }
     }
 
     Connections {
@@ -292,8 +296,12 @@ Item {
     }
 
     function tick() {
-        tickClock()
-        pos = playerPos() + Settings.lyricsSyncMs / 1000
+        if (root.previewMode) {
+            pos = root.previewPos
+        } else {
+            tickClock()
+            pos = playerPos() + Settings.lyricsSyncMs / 1000
+        }
         const L = lines
 
         // Подсветка и заливка идут ровно по синхронизированной позиции: активна всегда строго одна текущая строка
@@ -334,11 +342,11 @@ Item {
     // Волна по словам считается от позиции в каждом кадре: на общих 30 Гц она шла бы ступеньками
     // на мониторах 120–240 Гц. Программный рендер (lowPower) — по общим часам Ticker (~30 Гц).
     FrameAnimation {
-        running: root.live && root.advancing && !Theme.lowPower
+        running: root.live && !root.previewMode && root.advancing && !Theme.lowPower
         onTriggered: root.tick()
     }
     TickAnimation {
-        running: root.live && root.advancing && Theme.lowPower
+        running: root.live && !root.previewMode && root.advancing && Theme.lowPower
         onTriggered: root.tick()
     }
 
@@ -383,7 +391,7 @@ Item {
     EmptyState {
         anchors.centerIn: parent
         width: Math.min(parent.width - 32, 380)
-        visible: !root.stale && root.lines.length === 0 && Lyrics.status !== "loading"
+        visible: !root.previewMode && !root.stale && root.lines.length === 0 && Lyrics.status !== "loading"
         icon: "title"
         shape: "flower6"
         title: !Player.hasTrack ? I18n.t("Nothing's playing")
@@ -397,7 +405,7 @@ Item {
     }
     LoadingIndicator {
         anchors.centerIn: parent
-        visible: Lyrics.status === "loading" || (root.stale && Player.hasTrack)
+        visible: !root.previewMode && (Lyrics.status === "loading" || (root.stale && Player.hasTrack))
     }
 
     // ── подложка под текст ──────────────────────────────────────────────────
@@ -450,6 +458,7 @@ Item {
 
         WheelHandler {
             target: null
+            enabled: !root.previewMode
             acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             orientation: Qt.Vertical
             property real fineUntil: 0   // тачпад Windows: доли щелчка — сразу, без доводки (см. SmoothScroll)
@@ -470,6 +479,7 @@ Item {
         DragHandler {
             id: dragger
             target: null
+            enabled: !root.previewMode
             xAxis.enabled: false
             property real _last: 0
             onActiveChanged: _last = 0
@@ -492,7 +502,7 @@ Item {
         icon: "lyrics"
         text: I18n.t("Back to current line")
         visible: opacity > 0
-        opacity: !root.following && root.lines.length > 0 && !root.stale ? 1 : 0
+        opacity: !root.previewMode && !root.following && root.lines.length > 0 && !root.stale ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: Theme.motion.effectsFast } }
         onClicked: root.resumeFollowing()
     }
@@ -965,11 +975,11 @@ Item {
         // Обработчики, а не MouseArea: MouseArea забрала бы нажатие, и перетаскивание текста не началось бы
         HoverHandler {
             id: hover
-            enabled: !line.isGap && line.inLineRange
+            enabled: !root.previewMode && !line.isGap && line.inLineRange
             cursorShape: Qt.PointingHandCursor
         }
         TapHandler {
-            enabled: !line.isGap && line.inLineRange
+            enabled: !root.previewMode && !line.isGap && line.inLineRange
             onTapped: {
                 root.seekTo(line.modelData.t)
                 root.resumeFollowing()

@@ -1,112 +1,70 @@
 import QtQuick
-import QtQuick.Effects
-import Md3
-import Materialfy.Core
 
-// Превью стиля текста для настроек: те же пропорции, заливка, свечение, размытие и
-// масштаб неактивных строк, что у LyricsView, а не статичная жирная строка.
+// Превью в настройках — это настоящий LyricsView со своим текстом и часами:
+// тот же шейдер заливки, масштаб активной строки, размытие и паузы, а не отдельная имитация.
 Item {
     id: root
 
     property real baseFontSize: 20
-    property string mode: Settings.lyricsMode
-    readonly property bool spicy: mode === "spicy"
-    readonly property bool karaoke: mode === "karaoke"
-    readonly property real activeScale: Settings.lyricsActiveScale >= 1.0
-        ? Settings.lyricsActiveScale
-        : (spicy ? 1.12 : (karaoke ? 1.16 : 1.0))
-    readonly property real idleScale: Settings.lyricsIdleScale > 0
-        ? Math.min(activeScale, Settings.lyricsIdleScale)
-        : (spicy ? 0.88 : (karaoke ? 0.90 : 0.94))
-    readonly property real fontPx: baseFontSize * Settings.lyricsFontScale * activeScale
-    readonly property real dimAlpha: Settings.lyricsDimOpacity ?? (spicy ? 0.34 : 0.35)
-    readonly property int alignment: Settings.lyricsTextAlign === "center" ? Text.AlignHCenter
-        : (Settings.lyricsTextAlign === "right" ? Text.AlignRight : Text.AlignLeft)
-    readonly property real feather: Math.max(0.005, (spicy ? 0.40 : (karaoke ? 0.02 : 0.10)) * Settings.lyricsHighlight)
-    property real sweep: 0
+    property real position: 0
+    implicitHeight: 168
+    clip: true
 
-    implicitHeight: col.implicitHeight
+    LyricsView {
+        id: view
+        anchors.fill: parent
+        clip: true
+        baseFontSize: root.baseFontSize
+        previewMode: true
+        previewLines: root.demo
+        previewPos: root.position
+        showSource: false
+    }
 
-    SequentialAnimation {
+    Timer {
+        interval: 33
+        repeat: true
         running: true
-        loops: Animation.Infinite
-        NumberAnimation {
-            target: root
-            property: "sweep"
-            from: -0.08
-            to: 1.08
-            duration: 2800
-            easing.type: Easing.InOutQuad
-        }
-        PauseAnimation { duration: 650 }
-    }
-
-    Column {
-        id: col
-        width: parent.width
-        spacing: Math.round(root.fontPx * 0.26 * Settings.lyricsLineSpacing)
-
-        Text {
-            width: parent.width
-            visible: Settings.lyricsVisibleLines !== "one"
-            horizontalAlignment: root.alignment
-            text: "When the music starts to play"
-            font.family: Theme.fontFamily
-            font.pixelSize: root.fontPx * 0.72
-            color: Theme.fgSurface
-            opacity: root.dimAlpha
-            scale: root.idleScale / Math.max(1.0, root.activeScale)
-            transformOrigin: Item.Center
-            layer.enabled: Settings.lyricsBlurAmount > 0.001
-            layer.effect: MultiEffect {
-                blurEnabled: true
-                blurMax: 16
-                blur: 0.30 * Settings.lyricsBlurAmount
-                autoPaddingEnabled: true
-            }
-        }
-
-        Text {
-            id: active
-            width: parent.width
-            horizontalAlignment: root.alignment
-            text: root.karaoke ? "EVERY RHYTHM GUIDES THE WAY" : "Every rhythm guides the way"
-            font.family: Theme.fontFamily
-            font.pixelSize: root.fontPx
-            font.weight: Theme.variableFont ? Font.Normal : Font.Bold
-            font.variableAxes: Theme.fontAxes(root.fontPx, 700)
-            color: Theme.fgSurface
-            layer.enabled: true
-            layer.smooth: true
-            layer.effect: ShaderEffect {
-                property real feather: root.feather
-                property real dimAlpha: root.dimAlpha
-                readonly property real progress: -root.feather + root.sweep * (1 + 2 * root.feather)
-                readonly property real glow: root.spicy
-                    ? 0.90 * Settings.lyricsHighlight * Math.max(0, Math.sin(Math.PI * Math.max(0, Math.min(1, root.sweep))))
-                    : (root.karaoke ? 0.25 * Settings.lyricsHighlight : 0)
-                fragmentShader: Qt.resolvedUrl("shaders/wordfill.frag.qsb")
-            }
-        }
-
-        Text {
-            width: parent.width
-            visible: Settings.lyricsVisibleLines === "all"
-            horizontalAlignment: root.alignment
-            text: "Singing through the night and day"
-            font.family: Theme.fontFamily
-            font.pixelSize: root.fontPx * 0.72
-            color: Theme.fgSurface
-            opacity: root.dimAlpha
-            scale: root.idleScale / Math.max(1.0, root.activeScale)
-            transformOrigin: Item.Center
-            layer.enabled: Settings.lyricsBlurAmount > 0.001
-            layer.effect: MultiEffect {
-                blurEnabled: true
-                blurMax: 16
-                blur: 0.30 * Settings.lyricsBlurAmount
-                autoPaddingEnabled: true
-            }
+        onTriggered: {
+            root.position += 0.033
+            if (root.position > 7.4)
+                root.position = 0
+            view.tick()
         }
     }
+
+    property var demo: [
+        {
+            t: 0.0, e: 2.2, i: false,
+            w: [
+                { x: "When ", s: 0.0, e: 0.42 },
+                { x: "the ", s: 0.42, e: 0.70 },
+                { x: "music ", s: 0.70, e: 1.18 },
+                { x: "starts ", s: 1.18, e: 1.62 },
+                { x: "to ", s: 1.62, e: 1.82 },
+                { x: "play", s: 1.82, e: 2.2 }
+            ]
+        },
+        {
+            t: 2.2, e: 5.0, i: false,
+            w: [
+                { x: "Every ", s: 2.2, e: 2.7 },
+                { x: "rhythm ", s: 2.7, e: 3.35, p: [[2, 2.7, 2.95], [4, 2.95, 3.35]] },
+                { x: "guides ", s: 3.35, e: 3.95 },
+                { x: "the ", s: 3.95, e: 4.25 },
+                { x: "way", s: 4.25, e: 5.0 }
+            ]
+        },
+        {
+            t: 5.0, e: 7.4, i: false,
+            w: [
+                { x: "Singing ", s: 5.0, e: 5.6 },
+                { x: "through ", s: 5.6, e: 6.1 },
+                { x: "the ", s: 6.1, e: 6.35 },
+                { x: "night ", s: 6.35, e: 6.85 },
+                { x: "and ", s: 6.85, e: 7.1 },
+                { x: "day", s: 7.1, e: 7.4 }
+            ]
+        }
+    ]
 }
