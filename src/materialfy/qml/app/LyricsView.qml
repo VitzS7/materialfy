@@ -639,10 +639,6 @@ Item {
 
         readonly property bool isGap: !!modelData.gap
         readonly property bool isActive: index === root.activeIndex
-        // TTML: background vocal under the line and the other side of a duet (agent v2)
-        readonly property var bgWords: (!isGap && modelData.bg) ? modelData.bg : []
-        readonly property bool hasBg: bgWords.length > 0
-        readonly property bool duetRight: (modelData.agent ?? "") === "v2"
         // Активна всегда строго одна строка (isActive): две строки никогда не поют одновременно.
         // Входящая строка начинает плавно раскрываться в масштабе и чёткости синхронно с упреждением прокрутки
         // (isTarget), а уходящая строка сохраняет шейдер и плавно затухает в течение 340 мс после смены строки
@@ -785,7 +781,7 @@ Item {
             id: wordsBox
             visible: !line.isGap
             width: line.width
-            height: line.isGap ? 0 : Math.max(1, layout.rows) * line.rowH + (line.hasBg ? line.rowH * 0.52 : 0)
+            height: line.isGap ? 0 : Math.max(1, layout.rows) * line.rowH
 
             // Плавное вертикальное скольжение при входе/выходе строки и в режиме «Вся строка»
             property real wholeLineLift: {
@@ -881,17 +877,14 @@ Item {
 
             Item {
                 id: lineWords
-                x: line.duetRight
-                    ? Math.max(0, wordsBox.width - (wordsBox.layout?.lineWidth ?? 0))
-                    : (root.align === "center"
-                        ? Math.max(0, (wordsBox.width - (wordsBox.layout?.lineWidth ?? 0)) / 2)
-                        : (root.align === "right" ? Math.max(0, wordsBox.width - (wordsBox.layout?.lineWidth ?? 0)) : 0))
+                x: root.align === "center"
+                    ? Math.max(0, (wordsBox.width - (wordsBox.layout?.lineWidth ?? 0)) / 2)
+                    : (root.align === "right" ? Math.max(0, wordsBox.width - (wordsBox.layout?.lineWidth ?? 0)) : 0)
                 width: Math.max(1, wordsBox.layout?.lineWidth ?? 0)
-                height: Math.max(1, wordsBox.layout?.rows ?? 1) * line.rowH
+                height: wordsBox.height
 
                 transform: Scale {
-                    origin.x: line.duetRight ? lineWords.width
-                        : (root.align === "center" ? lineWords.width / 2 : (root.align === "right" ? lineWords.width : 0))
+                    origin.x: root.align === "center" ? lineWords.width / 2 : (root.align === "right" ? lineWords.width : 0)
                     origin.y: lineWords.height / 2
                     xScale: line.lineScale
                     yScale: line.lineScale
@@ -916,22 +909,6 @@ Item {
                         y: (wordsBox.layout.pos[index]?.row ?? 0) * line.rowH
                     }
                 }
-            }
-
-            // Бэк-вокал из TTML (`x-bg`): мельче и приглушённее, под основной строкой.
-            Text {
-                visible: line.hasBg
-                width: wordsBox.width
-                y: Math.max(1, wordsBox.layout?.rows ?? 1) * line.rowH
-                horizontalAlignment: line.duetRight ? Text.AlignRight
-                    : (root.align === "center" ? Text.AlignHCenter : (root.align === "right" ? Text.AlignRight : Text.AlignLeft))
-                text: line.bgWords.map(word => word.x).join("")
-                font.family: Theme.fontFamily
-                font.pixelSize: line.lineSize * 0.56
-                font.weight: Theme.variableFont ? Font.Normal : Font.Medium
-                font.variableAxes: Theme.fontAxes(line.lineSize * 0.56, 500)
-                color: root.textColor
-                opacity: root.dimAlpha
             }
         }
 

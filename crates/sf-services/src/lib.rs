@@ -168,8 +168,6 @@ impl Services {
         let fetcher = {
             let http = http.clone();
             mf_lyrics::LyricsFetcher::with_source(mf_platform::dirs::cache_subdir("lyrics"), move || http.client())
-                // ручные TTML (например, выгруженные из Spicy Lyrics) — в app_data/lyrics
-                .with_local_dir(mf_platform::dirs::app_data_dir().join("lyrics"))
         };
         let lyrics = LyricsService::new(rt.clone(), player.clone(), fetcher);
         let devices = DevicesService::new(rt.clone(), auth.clone(), player.clone(), settings.clone());
