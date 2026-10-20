@@ -25,7 +25,7 @@ use crate::text::{is_meta_line, is_placeholder};
 /// 6 — LRCLIB: нечёткое название и разметка, с которой согласно большинство записей;
 /// 7 — Spotify первым, id трека — base62 Spotify;
 /// 8 — Spotify SYLLABLE_SYNCED: время слов из слогов ответа вместо интерполяции
-pub const CACHE_VERSION: u32 = 8;
+pub const CACHE_VERSION: u32 = 9;
 /// «Не найдено» перепроверяется через 6 часов
 pub const NOT_FOUND_TTL_SECS: u64 = 6 * 3600;
 /// Таймаут HTTP источников, с (2 повтора на 5xx/сеть с паузой 0,7·(n+1) с)
@@ -358,18 +358,21 @@ impl LyricsFetcher {
         let duration = query.duration;
         let mut errors = Vec::new();
 
-        // 0. Spotify — первым: это текст именно этой записи
+        // 0. Spotify — первым: это текст именно этой записи. SYLLABLE_SYNCED даёт время слов;
+        // LINE_SYNCED — только строки, и его не отдаём сразу: другой источник с временем слов
+        // (NetEase YRC / Musixmatch richsync) даёт ту же нелинейную анимацию, что TTML у
+        // Spicy Lyrics. Spotify остаётся запасным вариантом до LRCLIB.
+        let mut spotify_line = None;
         if let Some(extra) = extra {
             let json = attempt(&mut errors, "spotify", extra().await).flatten();
             if let Some(json) = json {
-                // SYLLABLE_SYNCED — время слов из слогов; LINE_SYNCED — построчно с интерполяцией
                 if let Some(lines) = lines_from_spotify(&json) {
                     return LyricsResult::found(EXTRA_SOURCE, "word", lines);
                 }
                 if let Some(lrc) = lrc_from_spotify(&json).filter(|l| !l.is_empty()) {
                     let lines = build_from_timed_lines(&lines_from_lrc(&lrc), duration);
                     if !lines.is_empty() {
-                        return LyricsResult::found(EXTRA_SOURCE, "line", lines);
+                        spotify_line = Some(lines);
                     }
                 }
             }
@@ -379,6 +382,10 @@ impl LyricsFetcher {
             Ok(http) => http,
             Err(e) => {
                 errors.push(format!("network: {e}"));
+                // Без HTTP остаётся только то, что уже принёс extra (Spotify)
+                if let Some(lines) = spotify_line {
+                    return LyricsResult::found(EXTRA_SOURCE, "line", lines);
+                }
                 return LyricsResult::not_found(errors);
             }
         };
@@ -415,6 +422,12 @@ impl LyricsFetcher {
                 Some((_, lines)) => mxm_line = lines,
                 None => {}
             }
+        }
+
+        // 2.5. Spotify построчно — точная запись, но линейное заполнение: только если
+        // источники с временем слов ничего не дали.
+        if let Some(lines) = spotify_line {
+            return LyricsResult::found(EXTRA_SOURCE, "line", lines);
         }
 
         // 3. LRCLIB (по строкам, интерполяция)
@@ -651,7 +664,9 @@ mod tests {
     #[tokio::test]
     async fn incomplete_syllables_fall_back_to_the_line_lrc() {
         let dir = std::env::temp_dir().join(format!("mf-lyrics-test-half-syllables-{}", std::process::id()));
-        let fetcher = LyricsFetcher::new(dir.clone());
+        // Сеть выключена: проверяем, что построчный Spotify не теряется, когда другие
+        // источники недоступны (он теперь запасной, а не первый).
+        let fetcher = LyricsFetcher::with_source(dir.clone(), || Err("offline".into()));
         // SYLLABLE_SYNCED, но слогов у поющейся строки нет — построчный путь и интерполяция
         let json = serde_json::json!({"lyrics": {"syncType": "SYLLABLE_SYNCED", "lines": [
             {"startTimeMs": "1000", "words": "раз два", "syllables": []},

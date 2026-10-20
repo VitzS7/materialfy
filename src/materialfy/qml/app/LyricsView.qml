@@ -85,7 +85,7 @@ Item {
     // каскад прокрутки по всем строкам старого текста — несколько тяжёлых кадров подряд).
     readonly property bool stale: Lyrics.trackId !== Player.trackId
     readonly property bool live: visible && !stale && lines.length > 0
-    onLiveChanged: if (live) { jumpTimer.restart(); sync(Player.positionMs / 1000, 1.0); tick() }
+    onLiveChanged: if (live) { jumpTimer.restart(); sync(Player.positionMs / 1000); tick() }
 
     // Шрифт изначально растеризуется в полном размере активной строки (fontSize * activeScale):
     // тогда у активной строки масштаб слоя равен ровно 1.0 (100% нативная резкость пикселей без мыла),
@@ -193,16 +193,23 @@ Item {
         }
     }
 
-    // ── синхронизация с аудио (ФАПЧ / PLL) ──────────────────────────────────
-    // Плеер присылает позицию ~5 раз в секунду; между отсчётами часы идут непрерывно с учётом
-    // скорости воспроизведения, а мелкое расхождение (±260 мс) плавно выбирается множителем
-    // скорости _clockRate (0.82×..1.18×) без ступенчатых скачков и без отката назад посреди слога.
-    // Визуальное упреждение syncLeadSec (32 мс) компенсирует задержку восприятия и конвейера кадров,
-    // обеспечивая точную привязку к вокалу во всех трёх стилях (как в Spicy Lyrics).
+    // ── синхронизация с аудио (PLL) ──────────────────────────────────────────
+    // Плеер присылает позицию несколько раз в секунду; между отсчётами часы идут непрерывно с
+    // учётом скорости воспроизведения. Ошибка подмешивается low-pass-фильтром (τ = 300 мс), как
+    // в Spicy Lyrics, а не множителем скорости на каждом отсчёте: при редком шаге коррекция
+    // скоростью перелетала цель, и текст шёл то раньше, то позже. Большой скачок (перемотка,
+    // смена трека) ставит часы сразу. syncLeadSec (80 мс) — упреждение восприятия и кадров.
     property real _basePos: 0
     property real _baseTime: 0
-    property real _clockRate: 1.0
-    property real syncLeadSec: 0.032
+    property real _posOffset: 0
+    property real _measuredPos: 0
+    property real _measuredAt: 0
+    property bool _measured: false
+    property real _lastTick: 0
+    // Spicy Lyrics uses a 100 ms forward lead for the same reason; 80 ms leaves room
+    // for the audio device buffer without pushing the sweep visibly ahead.
+    property real syncLeadSec: 0.08
+    readonly property real clockTau: 0.30
     property real _seekTarget: 0
     property real _seekStartMs: 0
     property real _seekGuardUntil: 0
@@ -216,24 +223,26 @@ Item {
         if (!_wasPlaying)
             return _basePos
         const dt = Math.max(0, (Date.now() - _baseTime) / 1000)
-        const spd = (Settings.playbackSpeed > 0 ? Settings.playbackSpeed : 1.0) * _clockRate
+        const spd = Settings.playbackSpeed > 0 ? Settings.playbackSpeed : 1.0
         return _basePos + dt * spd
     }
     function playerPos() {
-        return Math.max(0, rawPlayerPos() + (_wasPlaying ? syncLeadSec : 0))
+        return Math.max(0, rawPlayerPos() + _posOffset + (_wasPlaying ? syncLeadSec : 0))
     }
-    function sync(p, rate) {
+    function sync(p) {
         _basePos = Math.max(0, p)
         _baseTime = Date.now()
-        _clockRate = rate !== undefined ? rate : 1.0
+        _posOffset = 0
+        _measured = false
+        _lastTick = 0
     }
 
     // Пауза/буферизация: возвращаемся к измеренной позиции, а не к замороженной
     function resyncPlayback() {
         if (root.advancing && !root._wasPlaying)
-            root.sync(Player.positionMs / 1000, 1.0)
+            root.sync(Player.positionMs / 1000)
         else
-            root.sync(root.rawPlayerPos(), 1.0)
+            root.sync(root.rawPlayerPos())
         root._wasPlaying = root.advancing
     }
 
@@ -250,14 +259,13 @@ Item {
                     root._seekGuardUntil = now + 180
                 return
             }
-            const cur = root.rawPlayerPos()
-            const err = measured - cur
-            if (Math.abs(err) > 0.26) {
-                root.sync(measured, 1.0)
+            if (Math.abs(measured - (root.rawPlayerPos() + root._posOffset)) > 0.5) {
+                // Перемотка, смена трека или большой провал: часы ставятся сразу
+                root.sync(measured)
             } else {
-                // Плавная коррекция скорости часов без разрыва фазы (cur остаётся непрерывным)
-                const rate = Math.max(0.82, Math.min(1.18, 1.0 + err * 1.65))
-                root.sync(cur, rate)
+                root._measuredPos = measured
+                root._measuredAt = now
+                root._measured = true
             }
             root.tick()
         }
@@ -269,7 +277,22 @@ Item {
         function onLyricsSyncMsChanged() { root.tick() }
     }
 
+    // Ошибку измеренной позиции подмешиваем в часы плавно: между отсчётами плеера
+    // позиция экстраполируется, а не догоняется скачком скорости.
+    function tickClock() {
+        const now = Date.now()
+        if (_measured && advancing) {
+            const spd = Settings.playbackSpeed > 0 ? Settings.playbackSpeed : 1.0
+            const measuredNow = _measuredPos + Math.max(0, (now - _measuredAt) / 1000) * spd
+            const err = measuredNow - (rawPlayerPos() + _posOffset)
+            const dt = _lastTick > 0 ? Math.min(0.1, Math.max(0, (now - _lastTick) / 1000)) : 0.016
+            _posOffset += err * (1 - Math.exp(-dt / clockTau))
+        }
+        _lastTick = now
+    }
+
     function tick() {
+        tickClock()
         pos = playerPos() + Settings.lyricsSyncMs / 1000
         const L = lines
 
@@ -327,7 +350,7 @@ Item {
         _seekStartMs = now
         _seekGuardUntil = now + 350
         Player.seekMs(Math.round(at * 1000))
-        sync(at, 1.0)
+        sync(at)
         tick()
     }
 
