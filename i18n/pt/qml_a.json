@@ -366,5 +366,8 @@
   "Inactive lines size": "Tamanho das linhas inativas",
   "{0}%: how much the lines around the singing one stay smaller": "{0}%: quanto as linhas ao redor da que está cantando ficam menores",
   "Interface scale": "Escala da interface",
-  "Size of text and controls. Takes effect after restarting the app": "Tamanho do texto e dos controles. Aplica-se após reiniciar o aplicativo"
+  "Size of text and controls. Takes effect after restarting the app": "Tamanho do texto e dos controles. Aplica-se após reiniciar o aplicativo",
+  "Restart to apply the scale": "Reiniciar para aplicar a escala",
+  "The interface scale is read when the app starts. Apply now reopens the app at the new size.": "A escala da interface é lida quando o app inicia. Aplicar reabre o app no novo tamanho.",
+  "Apply now": "Aplicar agora"
 }

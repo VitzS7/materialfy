@@ -28,6 +28,8 @@ Page {
         { key: "updates", text: I18n.t("Updates"), icon: "download" }
     ]
     property string currentSection: "account"
+    // The scale is read by Qt at launch: after a change, offer a one-click relaunch.
+    property bool scalePending: false
 
     readonly property int screenCount: Qt.application.screens ? Qt.application.screens.length : 1
 
@@ -608,6 +610,19 @@ Page {
         title: I18n.t("Appearance")
         icon: "palette"
 
+        SettingsBanner {
+            kind: "info"
+            icon: "restart_alt"
+            shown: page.scalePending
+            title: I18n.t("Restart to apply the scale")
+            text: I18n.t("The interface scale is read when the app starts. Apply now reopens the app at the new size.")
+            actionText: I18n.t("Apply now")
+            onAction: {
+                page.scalePending = false
+                Settings.relaunch()
+            }
+        }
+
         SettingRow {
             title: I18n.t("Language")
             // "system" (default) follows the OS UI language; the language names stay in their own language
@@ -639,7 +654,13 @@ Page {
                 autoSelect: false
                 size: page.compact ? "xs" : "s"
                 currentIndex: Math.max(0, [75, 100, 125, 150, 200].indexOf(Settings.uiScale))
-                onActivated: i => Settings.uiScale = [75, 100, 125, 150, 200][i]
+                onActivated: i => {
+                    const value = [75, 100, 125, 150, 200][i]
+                    if (value !== Settings.uiScale) {
+                        Settings.uiScale = value
+                        page.scalePending = true
+                    }
+                }
             }
         }
 

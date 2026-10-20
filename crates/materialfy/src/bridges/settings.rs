@@ -470,6 +470,10 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "applyEngineSettings"]
         fn apply_engine_settings(self: Pin<&mut Settings>);
+        /// Reopen the app: the interface scale is read only when Qt starts.
+        #[qinvokable]
+        #[cxx_name = "relaunch"]
+        fn relaunch(self: &Settings);
         /// Применить прокси (пароль — в хранилище секретов, не в настройки).
         #[qinvokable]
         #[cxx_name = "applyProxy"]
@@ -753,6 +757,43 @@ impl qobject::Settings {
 
     fn apply_engine_settings(self: Pin<&mut Self>) {
         ctx().services.auth.restart_engine();
+    }
+
+    /// Reopen the app after a setting that Qt reads only at startup (the interface scale).
+    /// The AppImage is the executable; a plain build relaunches its own binary. The shell
+    /// waits for this process to exit, so the new one finds the config and the MPRIS name free.
+    fn relaunch(&self) {
+        let exe = std::env::var_os("APPIMAGE")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_exe().ok());
+        let Some(exe) = exe else { return };
+        let pid = std::process::id();
+        #[cfg(unix)]
+        {
+            let script =
+                format!("while kill -0 {pid} 2>/dev/null; do sleep 0.1; done; exec \"$0\" --new-instance");
+            let _ = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .arg(&exe)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let path = exe.display().to_string().replace('\'', "''");
+            let script = format!(
+                "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath '{path}' -ArgumentList '--new-instance'"
+            );
+            let _ = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+                .creation_flags(0x0800_0000)
+                .spawn();
+        }
+        crate::qt::ffi::ffi::post_quit();
     }
 
     fn apply_proxy(
