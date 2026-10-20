@@ -6,6 +6,7 @@
 //! У построчных текстов время слов интерполируется. Формат результата и кэша (JSON) — по ключам как в Python.
 pub mod lrc;
 pub mod sources;
+pub mod ttml;
 pub mod text;
 
 use std::io;
@@ -241,6 +242,17 @@ pub fn lrc_from_spotify(json: &serde_json::Value) -> Option<String> {
     Some(out)
 }
 
+/// `<track>.ttml`: двоеточия и прочие символы, недопустимые в имени файла на Windows,
+/// заменяются на `_`. Обратное преобразование не нужно — имя только для чтения.
+pub fn local_file_name(track_id: &str) -> String {
+    let mut name: String = track_id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    name.push_str(".ttml");
+    name
+}
+
 /// Имя файла кэша: sha1(f"{CACHE_VERSION}|{track_id}") hex + ".json"
 pub fn cache_file_name(track_id: &str) -> String {
     cache_file_name_v(CACHE_VERSION, track_id)
@@ -271,6 +283,8 @@ type ClientSource = std::sync::Arc<dyn Fn() -> Result<reqwest::Client, String> +
 #[derive(Clone)]
 pub struct LyricsFetcher {
     cache_dir: PathBuf,
+    /// Optional folder of hand-made Apple Music TTML files (`<track>.ttml`); wins over every source.
+    local_dir: Option<PathBuf>,
     http: ClientSource,
 }
 
@@ -298,11 +312,18 @@ impl LyricsFetcher {
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
             tracing::warn!("lyrics: cache directory {} not created: {e}", cache_dir.display());
         }
-        Self { cache_dir, http: std::sync::Arc::new(source) }
+        Self { cache_dir, local_dir: None, http: std::sync::Arc::new(source) }
     }
 
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
+    }
+
+    /// Folder of local TTML files, named `<track id with non-alphanumerics replaced by _>.ttml`.
+    /// A file there is parsed before the cache and before every remote source.
+    pub fn with_local_dir(mut self, dir: PathBuf) -> Self {
+        self.local_dir = Some(dir);
+        self
     }
 
     /// <cache_dir>/<sha1>.json
@@ -337,6 +358,9 @@ impl LyricsFetcher {
     /// ok — навсегда, not found — NOT_FOUND_TTL_SECS по mtime. Найденное проходит add_gaps(lines, duration).
     /// Результат с непустым details (источник ответил ошибкой) не кэшируется. Запись — через .part + rename.
     pub async fn fetch_cached(&self, query: &LyricsQuery, extra: Option<ExtraLrc>) -> LyricsResult {
+        if let Some(local) = self.local(query).await {
+            return local;
+        }
         if let Some(cached) = self.read_cache(&query.track_id).await {
             return cached;
         }
@@ -351,6 +375,35 @@ impl LyricsFetcher {
             tracing::warn!("lyrics: cache {} not written: {e}", query.track_id);
         }
         result
+    }
+
+    /// `<local_dir>/<track>.ttml`: ручной текст (например, выгруженный из Spicy Lyrics TTML) важнее
+    /// всех источников. Не кэшируется: правка файла должна подхватываться сразу.
+    async fn local(&self, query: &LyricsQuery) -> Option<LyricsResult> {
+        let dir = self.local_dir.as_ref()?;
+        // the service passes the bare track id; accept the full URI spelling as well
+        let mut names = vec![local_file_name(&query.track_id)];
+        if !query.track_id.starts_with("spotify:") {
+            names.push(local_file_name(&format!("spotify:track:{}", query.track_id)));
+        }
+        let mut found = None;
+        for name in names {
+            if let Ok(xml) = tokio::fs::read_to_string(dir.join(name)).await {
+                found = Some(xml);
+                break;
+            }
+        }
+        let xml = found?;
+        let path = dir.join(local_file_name(&query.track_id));
+        let (lines, word) = match ttml::parse_ttml(&xml) {
+            Some(parsed) => parsed,
+            None => {
+                tracing::warn!("lyrics: local TTML {} has no timed lines", path.display());
+                return None;
+            }
+        };
+        let lines = add_gaps(lines, query.duration);
+        Some(LyricsResult::found("TTML", if word { "word" } else { "line" }, lines))
     }
 
     /// Цепочка источников без кэша (fetch в lyrics_sources.py); mxm_user_token — пусто = анонимный токен.
@@ -682,6 +735,26 @@ mod tests {
         let result = fetcher.fetch_cached(&query, Some(extra)).await;
         assert!(result.ok);
         assert_eq!((result.source.as_str(), result.kind.as_str()), (EXTRA_SOURCE, "line"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn local_ttml_wins_over_every_source() {
+        let dir = std::env::temp_dir().join(format!("mf-lyrics-test-ttml-{}", std::process::id()));
+        let local = dir.join("local");
+        tokio::fs::create_dir_all(&local).await.expect("local dir");
+        let xml = r#"<tt><body><div>
+            <p begin="1.0" end="2.0"><span begin="1.0" end="1.5">one</span> <span begin="1.5" end="2.0">two</span></p>
+        </div></body></tt>"#;
+        tokio::fs::write(local.join("spotify_track_local.ttml"), xml).await.expect("ttml");
+        let fetcher = LyricsFetcher::with_source(dir.clone(), || Err("offline".into()))
+            .with_local_dir(local);
+        let query = LyricsQuery { track_id: "spotify:track:local".into(), title: "x".into(), duration: 10.0, ..Default::default() };
+        let result = fetcher.fetch_cached(&query, None).await;
+        assert!(result.ok);
+        assert_eq!((result.source.as_str(), result.kind.as_str()), ("TTML", "word"));
+        assert!(result.lines.iter().any(|line| line.text().contains("one two")));
+        assert_eq!(local_file_name("spotify:track:local"), "spotify_track_local.ttml");
         let _ = std::fs::remove_dir_all(dir);
     }
 

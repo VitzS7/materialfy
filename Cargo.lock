@@ -2647,6 +2647,7 @@ dependencies = [
  "futures",
  "hex",
  "md-5",
+ "quick-xml",
  "regex",
  "reqwest",
  "serde",

@@ -51,6 +51,7 @@ unicode-normalization = "0.1.25"
 percent-encoding = "2"
 urlencoding = "2"
 protobuf = "3"
+quick-xml = "0.38"
 
 # ошибки и логи
 thiserror = "2.0.21"
