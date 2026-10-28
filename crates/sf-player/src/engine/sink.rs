@@ -254,8 +254,8 @@ impl AudioControl {
 
     /// Releases the gate if the requested replacement stopped instead.
     pub fn stopped(&self) {
+        // очередь не чистим: Sink::stop её уже доиграл, а без сброса следующая сессия пишет в ту же
         self.waiting_for_track.store(false, Ordering::SeqCst);
-        self.clear_queue();
     }
 
     /// The old output's queue no longer describes what will be heard.
@@ -294,7 +294,9 @@ impl AudioControl {
 
     /// How far the sound being heard is behind the packet librespot reports, in milliseconds.
     pub(crate) fn backlog_ms(&self) -> u32 {
-        self.backlog_ms_at(f64::from(super::fx::speed()))
+        // диджей играет на 1.0×, без растяжения
+        let speed = if self.report.narrating.load(Ordering::Relaxed) { 1.0 } else { super::fx::speed() };
+        self.backlog_ms_at(f64::from(speed))
     }
 
     /// `speed` is the time-stretch factor: the queue counts output frames, while the
