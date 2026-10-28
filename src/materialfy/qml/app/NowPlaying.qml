@@ -188,6 +188,7 @@ Item {
                     } else if (!root.layoutCompact && root.tab === next) {
                         // Повторное нажатие активной вкладки — центр-режим: только плеер по центру
                         root.tab = ""
+                        root.sheetOpen = false  // иначе после сужения окна — пустой экран
                     } else {
                         root.tab = next
                         root.sheetOpen = true
