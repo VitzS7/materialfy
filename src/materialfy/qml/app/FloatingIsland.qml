@@ -31,9 +31,11 @@ Window {
         onTriggered: root.contentItem.grabToImage(result => result.saveToFile(root.shotPath))
     }
 
-    readonly property bool mac: Qt.platform.os === "osx"
-    // на Mac верхние 32 px — вырез: там ничего не видно, содержимое раскрытого островка — под ним
-    readonly property int notchH: mac ? 32 : 0
+    // Вырез экрана Mac (ставит WindowShell.makeToolWindow, cpp/floating_mac.mm): там ничего не видно,
+    // содержимое раскрытого островка — под ним. Без выреза — 0
+    property int notchW: 0
+    property int notchH: 0
+    readonly property bool mac: notchH > 0
     readonly property int ear: 10
 
     readonly property bool motion: !Theme.reducedMotion && !Theme.lowPower
@@ -53,6 +55,7 @@ Window {
     // ---- Состояние ----
     property bool _open: false          // раскрыт наведением
     property bool _peek: false          // в покое выехал по курсору у края
+    property bool _wings: false         // Mac: курсор у выреза — по бокам от него выехали крылья с кнопками
     property bool _announce: false
     property bool _vol: false
     property bool _keys: false          // подсказка с клавишами под раскрытым островком
@@ -60,37 +63,44 @@ Window {
     readonly property string mode: forcedState !== "" ? forcedState
         : !Player.hasTrack ? (_peek ? "peek" : "idle")
         : _open ? "expanded"
+        : _wings ? "wings"
         : _announce ? "announcement"
         : _vol ? "volume"
+        : mac ? "idle"                  // Mac: в покое — только вырез, островок — по наведению
         : "compact"
 
     readonly property int expandedH: notchH + 158
+    readonly property int wingW: 106
     readonly property int targetW: mode === "expanded" ? 400
+        : mode === "wings" ? notchW + 2 * wingW
         : mode === "announcement" ? 360
         : mode === "peek" ? 260
         : mode === "volume" ? 240
-        : mode === "idle" ? (mac ? 200 : 120)
-        : (mac ? 300 : 164)
+        : mode === "idle" ? (mac ? notchW : 120)
+        : (mac ? notchW + 80 : 164)
     readonly property int targetH: mode === "expanded" ? expandedH
         : mode === "announcement" ? notchH + 52
         : mode === "peek" ? notchH + 44
-        : mode === "idle" ? (mac ? notchH : 5)
+        : mode === "idle" || mode === "wings" ? (mac ? notchH : 5)
         : mac && mode === "compact" ? notchH
         : notchH + 36
 
-    width: 400 + 2 * ear + 32
+    width: Math.max(400, notchW + 2 * wingW) + 2 * ear + 32
     height: expandedH + 56 // запас на подсказку клавиш под островком
     color: "transparent"
     title: "Materialfy"
     flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
     transientParent: null
-    screen: targetScreen || (mainWindow ? mainWindow.screen : null)
-    x: screen ? (screen.virtualX + Math.round((screen.width - width) / 2)) : 0
-    y: screen ? screen.virtualY : 0
+    // x и y — от целевого экрана, а не от screen: macOS сам переводит окно на экран, где лежат его координаты
+    readonly property var _screen: targetScreen || (mainWindow ? mainWindow.screen : null)
+    screen: _screen
+    x: _screen ? (_screen.virtualX + Math.round((_screen.width - width) / 2)) : 0
+    y: _screen ? _screen.virtualY : 0
 
     property bool _ready: false
     property bool _fullscreen: false
-    visible: _ready && (!_fullscreen || shotPath !== "")
+    // macOS: островок — только в вырезе экрана; экран без выреза его не показывает
+    visible: _ready && (!_fullscreen || shotPath !== "") && (Qt.platform.os !== "osx" || mac)
 
     Component.onCompleted: {
         WindowShell.makeToolWindow(root)
@@ -98,7 +108,8 @@ Window {
         _ready = true
     }
     Component.onDestruction: WindowShell.keyHook(root, false)
-    onVisibleChanged: if (!visible) { _collapse(); WindowShell.keyHook(root, false) }
+    // Qt сбрасывает уровень окна при показе (macOS): снова над строкой меню
+    onVisibleChanged: if (!visible) { _collapse(); WindowShell.keyHook(root, false) } else if (Qt.platform.os === "osx") WindowShell.makeToolWindow(root)
 
     // ---- Курсор: опрос 10 раз в секунду ----
     // В покое — полоса у самой кромки над полоской (курсор «упёрся» в край), на Mac — вырез; иначе — сам островок.
@@ -111,12 +122,12 @@ Window {
     on_InsideChanged: WindowShell.keyHook(root, _inside && mode !== "idle")
     Timer {
         // раскрыт — чаще: уход курсора ловим за ~40 мс, а не за 100
-        interval: root._open || root._peek ? 40 : 100
+        interval: root._open || root._peek || root._wings ? 40 : 100
         repeat: true
         running: root.visible && root.forcedState === ""
         onTriggered: {
             const idle = root.mode === "idle"
-            const zw = idle ? (root.mac ? 220 : 320) : island.width
+            const zw = idle ? (root.mac ? root.notchW + 20 : 320) : island.width
             const zh = idle ? (root.mac ? root.notchH : 3) : island.height
             const hit = WindowShell.cursorIn(root, Math.round((root.width - zw) / 2), 0, Math.round(zw), Math.round(zh))
             const busy = islandMenu.opened || seek.dragging
@@ -125,10 +136,10 @@ Window {
                 root._dwell += 1
                 // ~100–200 мс у края или над островком: случайный пролёт мыши к вкладкам браузера не раскрывает
                 if (root._dwell >= (idle ? 2 : 1))
-                    root._expand()
+                    root._hover()
             } else if (hit === 0 && !busy) {
                 root._dwell = 0
-                if (root._open || root._peek)
+                if (root._open || root._peek || root._wings)
                     leave.start()
             }
             if (root._inside)
@@ -138,6 +149,14 @@ Window {
     // Короткая пауза — прощает выскочивший на пару пикселей курсор, но не держит островок открытым
     Timer { id: leave; interval: 120; onTriggered: root._collapse() }
 
+    // Наведение: на Mac — крылья у выреза (панель — по клику), иначе — сразу раскрытие
+    function _hover() {
+        if (!mac || !Player.hasTrack || _open)
+            return _expand()
+        leave.stop()
+        _wings = true
+        _announce = false
+    }
     function _expand() {
         leave.stop()
         if (!Player.hasTrack) {
@@ -157,6 +176,7 @@ Window {
     }
     function _collapse() {
         _open = false
+        _wings = false
         _peek = false
         _keys = false
     }
@@ -254,6 +274,7 @@ Window {
             readonly property real radius: root.mode === "idle" ? 3
                 : root.mode === "expanded" ? 30
                 : root.mode === "announcement" || root.mode === "peek" ? 22
+                : root.mode === "wings" ? 14
                 : 18
             // 0 — компактный, 1 — раскрытый: по нему слои переливаются друг в друга
             readonly property real t: Math.max(0, Math.min(1, (height - root.notchH - 36) / (root.expandedH - root.notchH - 36)))
@@ -288,8 +309,8 @@ Window {
                 antialiasing: true
                 clip: true
                 color: root.mode === "idle" ? (root.colorMode ? Theme.primary : "#101114") : root.body
-                opacity: root.mode === "idle" && root.mac ? 0 : 1
-                border.width: root.mode === "idle" ? 1 : 0
+                // Mac: в покое чёрное тело сливается с вырезом — крылья видно, как они в него уезжают
+                border.width: root.mode === "idle" && !root.mac ? 1 : 0
                 border.color: Qt.rgba(1, 1, 1, 0.28)
 
                 // Цветной: обложка размыта под тёмным стеклом и «плавает», пока играет (настройки фона плеера). clip режет
@@ -366,10 +387,14 @@ Window {
             }
             TapHandler {
                 acceptedButtons: Qt.LeftButton
-                onTapped: {
+                onTapped: point => {
                     if (root.mode === "peek")
                         WindowShell.raiseMain()
-                    else if (root.mode !== "expanded")
+                    else if (root.mode === "wings") {
+                        // клик по самому вырезу; кнопки на крыльях — свои
+                        if (point.position.x > root.wingW && point.position.x < island.width - root.wingW)
+                            root._expand()
+                    } else if (root.mode !== "expanded")
                         root._expand()
                 }
             }
@@ -385,7 +410,7 @@ Window {
                 y: root.mac && root.mode !== "compact" ? root.notchH : 0
                 width: parent.width
                 height: parent.height - y
-                visible: root.mode !== "idle" && island.t < 0.7
+                visible: root.mode !== "idle" && root.mode !== "wings" && island.t < 0.7
                 opacity: Math.max(0, 1 - island.t * 1.6)
 
                 // обложка слева (в покое — значок приложения)
@@ -523,6 +548,65 @@ Window {
                     inkDim: root.inkDim
                     accent: root.accent
                     colorMode: root.colorMode
+                }
+            }
+
+            // ================= Крылья у выреза (Mac): слева обложка и лайк, справа управление =================
+            Item {
+                id: wingsLayer
+                anchors.fill: parent
+                clip: true
+                visible: opacity > 0.01
+                opacity: root.mode === "wings" ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: Theme.motion.effectsFast } }
+
+                Row {
+                    x: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+                    transform: Translate { x: root.mode === "wings" ? 0 : 24; Behavior on x { enabled: root.motion; NumberAnimation { duration: Theme.motion.spatialFast; easing.type: Easing.OutCubic } } }
+                    MorphImage {
+                        id: wingCover
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 24
+                        height: 24
+                        source: Player.cover
+                        eager: true
+                        fallbackKind: Player.album !== "" ? "album" : "track"
+                        fallbackArtist: Player.artist.split(", ")[0]
+                        fallbackTitle: Player.album !== "" ? Player.album : Player.title
+                        shape: Player.playing ? "cookie12" : "softSquare"
+                        pulse: root.motion && Player.playing && Settings.coverPulse ? Math.min(0.24, Player.level * 0.35) : 0
+                        TapHandler { onTapped: WindowShell.raiseMain() }
+                    }
+                    Bars {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 22
+                        height: 14
+                        opacity: Player.playing ? 1 : 0.3
+                    }
+                    IslandBtn {
+                        readonly property string trackId: Player.track && Player.track.trackId ? String(Player.track.trackId) : ""
+                        readonly property bool liked: Library.likesRevision >= 0 && trackId !== "" && Library.isLiked(trackId)
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: Player.isEpisode !== true
+                        size: 30
+                        iconSize: 18
+                        icon: "favorite"
+                        filled: liked
+                        tint: liked ? root.accent : root.inkDim
+                        onClicked: Library.toggleLike(Player.track)
+                    }
+                }
+                Row {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 2
+                    transform: Translate { x: root.mode === "wings" ? 0 : -24; Behavior on x { enabled: root.motion; NumberAnimation { duration: Theme.motion.spatialFast; easing.type: Easing.OutCubic } } }
+                    IslandBtn { size: 30; iconSize: 20; icon: "skip_previous"; filled: true; onClicked: Player.previous() }
+                    IslandBtn { size: 30; iconSize: 22; icon: Player.playing ? "pause" : "play_arrow"; filled: true; tint: root.accent; onClicked: Player.togglePlay() }
+                    IslandBtn { size: 30; iconSize: 20; icon: "skip_next"; filled: true; onClicked: Player.next() }
                 }
             }
 

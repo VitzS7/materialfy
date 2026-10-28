@@ -154,8 +154,11 @@ Page {
         }
         return null
     }
+    function _cardTop(card) {
+        return card.mapToItem(page.flickable.contentItem, 0, 0).y
+    }
     function _cardY(card) {
-        return card.mapToItem(page.flickable.contentItem, 0, 0).y - nav.height - 16
+        return _cardTop(card) - nav.height - 16
     }
     function scrollToSection(key, animated) {
         const card = cardFor(key)
@@ -172,13 +175,28 @@ Page {
     function _followScroll() {
         if (!_following)
             return
-        const y = page.flickable.contentY
-        let cur = sections[0].key
+        // строка разделов прилипает сверху и закрывает полосу под собой — как в _cardY
+        const viewTop = page.flickable.contentY + nav.height + 16
+        const viewBottom = page.flickable.contentY + page.flickable.height
+        let cur = currentSection
+        let best = 0
+        // смотрим на видимую площадь, а не на верх карточки: следующая может начинаться
+        // ниже экрана, но уже занимать его почти целиком, пока предыдущая уехала наверх
         for (const s of sections) {
             const card = cardFor(s.key)
-            if (card && _cardY(card) <= y + 40)
+            if (!card)
+                continue
+            const top = _cardTop(card)
+            const visible = Math.min(top + card.height, viewBottom) - Math.max(top, viewTop)
+            // доля того, что карточка вообще может показать: короткая целиком на экране не проигрывает высокой соседке
+            const score = visible / Math.max(1, Math.min(card.height, viewBottom - viewTop))
+            if (score > best) {
+                best = score
                 cur = s.key
+            }
         }
+        if (page.flickable.contentY <= page.flickable.originY + 2)
+            cur = sections[0].key
         if (page.flickable.contentY >= page.flickable.maxY - 2)
             cur = sections[sections.length - 1].key
         currentSection = cur
@@ -858,18 +876,18 @@ Page {
             }
         }
 
-        // Плеер вне окна: островок — Windows и X11 (на Wayland окно не встанет у края экрана само),
+        // Плеер вне окна: островок — Windows, macOS и X11 (на Wayland окно не встанет у края экрана само),
         // панель задач — только Windows; где нет ни того ни другого, раздела нет
         FloatingPlayerPicker {
             id: floatingPicker
             modes: ["off"]
-                .concat(Qt.platform.os === "windows" || (Qt.platform.os === "linux" && !Qt.platform.pluginName.startsWith("wayland")) ? ["island"] : [])
+                .concat(Qt.platform.os === "windows" || Qt.platform.os === "osx" || (Qt.platform.os === "linux" && !Qt.platform.pluginName.startsWith("wayland")) ? ["island"] : [])
                 .concat(Qt.platform.os === "windows" ? ["taskbar", "both"] : [])
             visible: modes.length > 1
         }
 
         SettingRow {
-            visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && page.screenCount > 1
+            visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && page.screenCount > 1 && Qt.platform.os !== "osx"
             title: Settings.floatingPlayer === "both" ? I18n.t("Island displays") : I18n.t("Displays")
             description: I18n.t("Choose which monitors display the island player")
             Flow {
@@ -1043,50 +1061,21 @@ Page {
         title: I18n.t("Lyrics")
         icon: "lyrics"
 
-        // Интерактивный предпросмотр строки текста в реальном времени
+        // Живое превью: заливка по слову, свечение и размытие как в LyricsView.
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: previewCol.implicitHeight + 28
+            implicitHeight: preview.implicitHeight + 28
             radius: Theme.shape.large
-            color: Settings.lyricsScrim === "strong" ? Qt.rgba(Theme.surfaceContainerLowest.r, Theme.surfaceContainerLowest.g, Theme.surfaceContainerLowest.b, 0.75)
-                 : Settings.lyricsScrim === "soft" ? Qt.rgba(Theme.surfaceContainerLowest.r, Theme.surfaceContainerLowest.g, Theme.surfaceContainerLowest.b, 0.4)
-                 : "transparent"
+            // The mounted view paints the scrim itself; tinting the card too would double it.
+            color: "transparent"
             border.width: 1
             border.color: Theme.outlineVariant
 
-            ColumnLayout {
-                id: previewCol
+            LyricsStylePreview {
+                id: preview
                 anchors.centerIn: parent
                 width: parent.width - 32
-                spacing: Math.round(6 * Settings.lyricsLineSpacing)
-
-                Label {
-                    Layout.fillWidth: true
-                    visible: Settings.lyricsVisibleLines !== "one"
-                    horizontalAlignment: Settings.lyricsTextAlign === "center" ? Text.AlignHCenter : Text.AlignLeft
-                    text: "♫  When the music starts to play"
-                    type: "bodyLarge"
-                    color: Theme.fgSurfaceVariant
-                    opacity: Settings.lyricsBlurAmount > 0.4 ? 0.35 : 0.6
-                }
-                Label {
-                    Layout.fillWidth: true
-                    horizontalAlignment: Settings.lyricsTextAlign === "center" ? Text.AlignHCenter : Text.AlignLeft
-                    text: Settings.lyricsMode === "karaoke" ? "EVERY RHYTHM GUIDES THE WAY"
-                        : "Every rhythm guides the way"
-                    font.bold: Settings.lyricsMode !== "normal"
-                    font.pixelSize: Math.round(18 * Settings.lyricsFontScale * (Settings.lyricsMode === "spicy" ? 1.25 : (Settings.lyricsMode === "karaoke" ? 1.15 : 1.0)))
-                    color: Theme.primary
-                }
-                Label {
-                    Layout.fillWidth: true
-                    visible: Settings.lyricsVisibleLines === "all"
-                    horizontalAlignment: Settings.lyricsTextAlign === "center" ? Text.AlignHCenter : Text.AlignLeft
-                    text: "Singing through the night and day"
-                    type: "bodyLarge"
-                    color: Theme.fgSurfaceVariant
-                    opacity: Settings.lyricsBlurAmount > 0.4 ? 0.35 : 0.6
-                }
+                baseFontSize: 20
             }
         }
 
@@ -1203,18 +1192,6 @@ Page {
             }
         }
 
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-            Item { Layout.fillWidth: true }
-            Button {
-                text: I18n.t("Reading")
-                icon: "visibility"
-                style: "tonal"
-                size: "xs"
-                onClicked: page.scrollToSection("reading", true)
-            }
-        }
     }
 
     // ================= Чтение =================
@@ -1401,18 +1378,6 @@ Page {
             }
         }
 
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-            Item { Layout.fillWidth: true }
-            Button {
-                text: I18n.t("Lyrics")
-                icon: "lyrics"
-                style: "tonal"
-                size: "xs"
-                onClicked: page.scrollToSection("lyrics", true)
-            }
-        }
     }
 
     // ================= Воспроизведение =================

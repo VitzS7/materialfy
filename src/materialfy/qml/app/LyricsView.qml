@@ -80,12 +80,16 @@ Item {
     property color textColor: Theme.fgSurface
     property int resumeMs: 3000
 
-    readonly property var lines: Lyrics.lines
+    // Превью в настройках — тот же вид, но со своими строками и часами; обычный путь не меняется.
+    property bool previewMode: false
+    property var previewLines: []
+    property real previewPos: 0
+    readonly property var lines: previewMode ? previewLines : Lyrics.lines
     // Трек уже сменился, а текст ещё от прошлого: гасим и не обрабатываем (иначе позиция 0 запускает
     // каскад прокрутки по всем строкам старого текста — несколько тяжёлых кадров подряд).
-    readonly property bool stale: Lyrics.trackId !== Player.trackId
+    readonly property bool stale: !previewMode && Lyrics.trackId !== Player.trackId
     readonly property bool live: visible && !stale && lines.length > 0
-    onLiveChanged: if (live) { jumpTimer.restart(); sync(Player.positionMs / 1000, 1.0); tick() }
+    onLiveChanged: if (live && !previewMode) { jumpTimer.restart(); sync(Player.positionMs / 1000); tick() }
 
     // Шрифт изначально растеризуется в полном размере активной строки (fontSize * activeScale):
     // тогда у активной строки масштаб слоя равен ровно 1.0 (100% нативная резкость пикселей без мыла),
@@ -100,6 +104,9 @@ Item {
 
     property real pos: 0
     property int activeIndex: -1
+    // Forces a re-layout of the words: the preview sets its lines before the delegates exist,
+    // and the layout binding cannot see their implicit widths until something wakes it.
+    property int layoutRevision: 0
     property int _targetScrollIndex: -1
     readonly property int scrollIndex: _targetScrollIndex
 
@@ -188,21 +195,30 @@ Item {
             jumpTimer.restart()               // пока строится — без каскада прокрутки
             if (root._built >= root._lines.length) {
                 running = false
+                // Слова существуют только теперь: будим раскладку, иначе все они стоят в x=0.
+                root.layoutRevision++
                 root.tick()
             }
         }
     }
 
-    // ── синхронизация с аудио (ФАПЧ / PLL) ──────────────────────────────────
-    // Плеер присылает позицию ~5 раз в секунду; между отсчётами часы идут непрерывно с учётом
-    // скорости воспроизведения, а мелкое расхождение (±260 мс) плавно выбирается множителем
-    // скорости _clockRate (0.82×..1.18×) без ступенчатых скачков и без отката назад посреди слога.
-    // Визуальное упреждение syncLeadSec (32 мс) компенсирует задержку восприятия и конвейера кадров,
-    // обеспечивая точную привязку к вокалу во всех трёх стилях (как в Spicy Lyrics).
+    // ── синхронизация с аудио (PLL) ──────────────────────────────────────────
+    // Плеер присылает позицию несколько раз в секунду; между отсчётами часы идут непрерывно с
+    // учётом скорости воспроизведения. Ошибка подмешивается low-pass-фильтром (τ = 300 мс), как
+    // в Spicy Lyrics, а не множителем скорости на каждом отсчёте: при редком шаге коррекция
+    // скоростью перелетала цель, и текст шёл то раньше, то позже. Большой скачок (перемотка,
+    // смена трека) ставит часы сразу. syncLeadSec (80 мс) — упреждение восприятия и кадров.
     property real _basePos: 0
     property real _baseTime: 0
-    property real _clockRate: 1.0
-    property real syncLeadSec: 0.032
+    property real _posOffset: 0
+    property real _measuredPos: 0
+    property real _measuredAt: 0
+    property bool _measured: false
+    property real _lastTick: 0
+    // Spicy Lyrics uses a 100 ms forward lead for the same reason; 80 ms leaves room
+    // for the audio device buffer without pushing the sweep visibly ahead.
+    property real syncLeadSec: 0.08
+    readonly property real clockTau: 0.30
     property real _seekTarget: 0
     property real _seekStartMs: 0
     property real _seekGuardUntil: 0
@@ -210,37 +226,39 @@ Item {
     // То же, пока трек ещё грузится: «играет» в это время оптимистично, а звука нет.
     readonly property bool advancing: Player.playing && !Player.narrating && !Player.buffering
     property bool _wasPlaying: advancing
-    onAdvancingChanged: resyncPlayback()
+    onAdvancingChanged: if (!previewMode) resyncPlayback()
 
     function rawPlayerPos() {
         if (!_wasPlaying)
             return _basePos
         const dt = Math.max(0, (Date.now() - _baseTime) / 1000)
-        const spd = (Settings.playbackSpeed > 0 ? Settings.playbackSpeed : 1.0) * _clockRate
+        const spd = Settings.playbackSpeed > 0 ? Settings.playbackSpeed : 1.0
         return _basePos + dt * spd
     }
     function playerPos() {
-        return Math.max(0, rawPlayerPos() + (_wasPlaying ? syncLeadSec : 0))
+        return Math.max(0, rawPlayerPos() + _posOffset + (_wasPlaying ? syncLeadSec : 0))
     }
-    function sync(p, rate) {
+    function sync(p) {
         _basePos = Math.max(0, p)
         _baseTime = Date.now()
-        _clockRate = rate !== undefined ? rate : 1.0
+        _posOffset = 0
+        _measured = false
+        _lastTick = 0
     }
 
     // Пауза/буферизация: возвращаемся к измеренной позиции, а не к замороженной
     function resyncPlayback() {
         if (root.advancing && !root._wasPlaying)
-            root.sync(Player.positionMs / 1000, 1.0)
+            root.sync(Player.positionMs / 1000)
         else
-            root.sync(root.rawPlayerPos(), 1.0)
+            root.sync(root.rawPlayerPos())
         root._wasPlaying = root.advancing
     }
 
     Connections {
         target: Player
         function onPositionChanged() {
-            if (!root.live)
+            if (!root.live || root.previewMode)
                 return
             const now = Date.now()
             const measured = Player.positionMs / 1000
@@ -250,18 +268,17 @@ Item {
                     root._seekGuardUntil = now + 180
                 return
             }
-            const cur = root.rawPlayerPos()
-            const err = measured - cur
-            if (Math.abs(err) > 0.26) {
-                root.sync(measured, 1.0)
+            if (Math.abs(measured - (root.rawPlayerPos() + root._posOffset)) > 0.5) {
+                // Перемотка, смена трека или большой провал: часы ставятся сразу
+                root.sync(measured)
             } else {
-                // Плавная коррекция скорости часов без разрыва фазы (cur остаётся непрерывным)
-                const rate = Math.max(0.82, Math.min(1.18, 1.0 + err * 1.65))
-                root.sync(cur, rate)
+                root._measuredPos = measured
+                root._measuredAt = now
+                root._measured = true
             }
             root.tick()
         }
-        function onStateChanged() { root.resyncPlayback() }
+        function onStateChanged() { if (!root.previewMode) root.resyncPlayback() }
     }
 
     Connections {
@@ -269,8 +286,27 @@ Item {
         function onLyricsSyncMsChanged() { root.tick() }
     }
 
+    // Ошибку измеренной позиции подмешиваем в часы плавно: между отсчётами плеера
+    // позиция экстраполируется, а не догоняется скачком скорости.
+    function tickClock() {
+        const now = Date.now()
+        if (_measured && advancing) {
+            const spd = Settings.playbackSpeed > 0 ? Settings.playbackSpeed : 1.0
+            const measuredNow = _measuredPos + Math.max(0, (now - _measuredAt) / 1000) * spd
+            const err = measuredNow - (rawPlayerPos() + _posOffset)
+            const dt = _lastTick > 0 ? Math.min(0.1, Math.max(0, (now - _lastTick) / 1000)) : 0.016
+            _posOffset += err * (1 - Math.exp(-dt / clockTau))
+        }
+        _lastTick = now
+    }
+
     function tick() {
-        pos = playerPos() + Settings.lyricsSyncMs / 1000
+        if (root.previewMode) {
+            pos = root.previewPos
+        } else {
+            tickClock()
+            pos = playerPos() + Settings.lyricsSyncMs / 1000
+        }
         const L = lines
 
         // Подсветка и заливка идут ровно по синхронизированной позиции: активна всегда строго одна текущая строка
@@ -311,11 +347,11 @@ Item {
     // Волна по словам считается от позиции в каждом кадре: на общих 30 Гц она шла бы ступеньками
     // на мониторах 120–240 Гц. Программный рендер (lowPower) — по общим часам Ticker (~30 Гц).
     FrameAnimation {
-        running: root.live && root.advancing && !Theme.lowPower
+        running: root.live && !root.previewMode && root.advancing && !Theme.lowPower
         onTriggered: root.tick()
     }
     TickAnimation {
-        running: root.live && root.advancing && Theme.lowPower
+        running: root.live && !root.previewMode && root.advancing && Theme.lowPower
         onTriggered: root.tick()
     }
 
@@ -327,7 +363,7 @@ Item {
         _seekStartMs = now
         _seekGuardUntil = now + 350
         Player.seekMs(Math.round(at * 1000))
-        sync(at, 1.0)
+        sync(at)
         tick()
     }
 
@@ -360,7 +396,7 @@ Item {
     EmptyState {
         anchors.centerIn: parent
         width: Math.min(parent.width - 32, 380)
-        visible: !root.stale && root.lines.length === 0 && Lyrics.status !== "loading"
+        visible: !root.previewMode && !root.stale && root.lines.length === 0 && Lyrics.status !== "loading"
         icon: "title"
         shape: "flower6"
         title: !Player.hasTrack ? I18n.t("Nothing's playing")
@@ -374,7 +410,7 @@ Item {
     }
     LoadingIndicator {
         anchors.centerIn: parent
-        visible: Lyrics.status === "loading" || (root.stale && Player.hasTrack)
+        visible: !root.previewMode && (Lyrics.status === "loading" || (root.stale && Player.hasTrack))
     }
 
     // ── подложка под текст ──────────────────────────────────────────────────
@@ -427,6 +463,7 @@ Item {
 
         WheelHandler {
             target: null
+            enabled: !root.previewMode
             acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             orientation: Qt.Vertical
             property real fineUntil: 0   // тачпад Windows: доли щелчка — сразу, без доводки (см. SmoothScroll)
@@ -447,6 +484,7 @@ Item {
         DragHandler {
             id: dragger
             target: null
+            enabled: !root.previewMode
             xAxis.enabled: false
             property real _last: 0
             onActiveChanged: _last = 0
@@ -469,7 +507,7 @@ Item {
         icon: "lyrics"
         text: I18n.t("Back to current line")
         visible: opacity > 0
-        opacity: !root.following && root.lines.length > 0 && !root.stale ? 1 : 0
+        opacity: !root.previewMode && !root.following && root.lines.length > 0 && !root.stale ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: Theme.motion.effectsFast } }
         onClicked: root.resumeFollowing()
     }
@@ -638,6 +676,8 @@ Item {
         }
         readonly property real lineSize: root.activeFontPx
         readonly property real rowH: root.rowH
+        // Bumped as each word delegate appears: the layout needs their real widths.
+        property int layoutRevision: 0
 
         // Фильтр видимости строк (ползунок от 1 до 15 / Все)
         readonly property bool inLineRange: {
@@ -812,6 +852,7 @@ Item {
             // Перенос слов по строкам с поддержкой выравнивания влево, по центру и вправо.
             // Так как на активной строке lineScale == 1.0, доступная ширина равна полной ширине колонки!
             readonly property var layout: {
+                const revision = root.layoutRevision + line.layoutRevision
                 const n = wordRep.count
                 const avail = Math.max(1, width)
                 const pos = []
@@ -860,6 +901,7 @@ Item {
                 Repeater {
                     id: wordRep
                     model: line.isGap ? [] : line.modelData.w
+                    onItemAdded: line.layoutRevision++
                     delegate: LyricWord {
                         lineActive: line.filling
                         lineOutgoing: line.isOutgoing
@@ -919,11 +961,11 @@ Item {
         // Обработчики, а не MouseArea: MouseArea забрала бы нажатие, и перетаскивание текста не началось бы
         HoverHandler {
             id: hover
-            enabled: !line.isGap && line.inLineRange
+            enabled: !root.previewMode && !line.isGap && line.inLineRange
             cursorShape: Qt.PointingHandCursor
         }
         TapHandler {
-            enabled: !line.isGap && line.inLineRange
+            enabled: !root.previewMode && !line.isGap && line.inLineRange
             onTapped: {
                 root.seekTo(line.modelData.t)
                 root.resumeFollowing()
