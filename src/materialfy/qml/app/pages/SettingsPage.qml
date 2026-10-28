@@ -150,8 +150,11 @@ Page {
         }
         return null
     }
+    function _cardTop(card) {
+        return card.mapToItem(page.flickable.contentItem, 0, 0).y
+    }
     function _cardY(card) {
-        return card.mapToItem(page.flickable.contentItem, 0, 0).y - nav.height - 16
+        return _cardTop(card) - nav.height - 16
     }
     function scrollToSection(key, animated) {
         const card = cardFor(key)
@@ -168,13 +171,28 @@ Page {
     function _followScroll() {
         if (!_following)
             return
-        const y = page.flickable.contentY
-        let cur = sections[0].key
+        // строка разделов прилипает сверху и закрывает полосу под собой — как в _cardY
+        const viewTop = page.flickable.contentY + nav.height + 16
+        const viewBottom = page.flickable.contentY + page.flickable.height
+        let cur = currentSection
+        let best = 0
+        // смотрим на видимую площадь, а не на верх карточки: следующая может начинаться
+        // ниже экрана, но уже занимать его почти целиком, пока предыдущая уехала наверх
         for (const s of sections) {
             const card = cardFor(s.key)
-            if (card && _cardY(card) <= y + 40)
+            if (!card)
+                continue
+            const top = _cardTop(card)
+            const visible = Math.min(top + card.height, viewBottom) - Math.max(top, viewTop)
+            // доля того, что карточка вообще может показать: короткая целиком на экране не проигрывает высокой соседке
+            const score = visible / Math.max(1, Math.min(card.height, viewBottom - viewTop))
+            if (score > best) {
+                best = score
                 cur = s.key
+            }
         }
+        if (page.flickable.contentY <= page.flickable.originY + 2)
+            cur = sections[0].key
         if (page.flickable.contentY >= page.flickable.maxY - 2)
             cur = sections[sections.length - 1].key
         currentSection = cur
@@ -822,18 +840,18 @@ Page {
             }
         }
 
-        // Плеер вне окна: островок — Windows и X11 (на Wayland окно не встанет у края экрана само),
+        // Плеер вне окна: островок — Windows, macOS и X11 (на Wayland окно не встанет у края экрана само),
         // панель задач — только Windows; где нет ни того ни другого, раздела нет
         FloatingPlayerPicker {
             id: floatingPicker
             modes: ["off"]
-                .concat(Qt.platform.os === "windows" || (Qt.platform.os === "linux" && !Qt.platform.pluginName.startsWith("wayland")) ? ["island"] : [])
+                .concat(Qt.platform.os === "windows" || Qt.platform.os === "osx" || (Qt.platform.os === "linux" && !Qt.platform.pluginName.startsWith("wayland")) ? ["island"] : [])
                 .concat(Qt.platform.os === "windows" ? ["taskbar", "both"] : [])
             visible: modes.length > 1
         }
 
         SettingRow {
-            visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && page.screenCount > 1
+            visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && page.screenCount > 1 && Qt.platform.os !== "osx"
             title: Settings.floatingPlayer === "both" ? I18n.t("Island displays") : I18n.t("Displays")
             description: I18n.t("Choose which monitors display the island player")
             Flow {

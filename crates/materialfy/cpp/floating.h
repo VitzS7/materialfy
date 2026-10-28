@@ -9,7 +9,8 @@ namespace mf {
 // window — QWindow* (Window из QML). Вне Windows — заглушки (false / 0 / ""), кроме масок и floating_cursor_in.
 
 // Окно-островок: не в панели задач и Alt+Tab, не забирает фокус (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE),
-// DWM не скругляет углы. false — не Windows или нет HWND.
+// DWM не скругляет углы. macOS (floating_mac.mm): над строкой меню, на всех рабочих столах, размер выреза экрана —
+// в свойства окна notchW / notchH. false — другая ОС или окна нет.
 bool floating_tool_window(QObject* window);
 
 // Где окно ловит мышь и рисуется: прямоугольник в логических пикселях окна; w <= 0 — всё окно.
