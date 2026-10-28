@@ -822,18 +822,18 @@ Page {
             }
         }
 
-        // Плеер вне окна: островок — Windows и X11 (на Wayland окно не встанет у края экрана само),
+        // Плеер вне окна: островок — Windows, macOS и X11 (на Wayland окно не встанет у края экрана само),
         // панель задач — только Windows; где нет ни того ни другого, раздела нет
         FloatingPlayerPicker {
             id: floatingPicker
             modes: ["off"]
-                .concat(Qt.platform.os === "windows" || (Qt.platform.os === "linux" && !Qt.platform.pluginName.startsWith("wayland")) ? ["island"] : [])
+                .concat(Qt.platform.os === "windows" || Qt.platform.os === "osx" || (Qt.platform.os === "linux" && !Qt.platform.pluginName.startsWith("wayland")) ? ["island"] : [])
                 .concat(Qt.platform.os === "windows" ? ["taskbar", "both"] : [])
             visible: modes.length > 1
         }
 
         SettingRow {
-            visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && page.screenCount > 1
+            visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && page.screenCount > 1 && Qt.platform.os !== "osx"
             title: Settings.floatingPlayer === "both" ? I18n.t("Island displays") : I18n.t("Displays")
             description: I18n.t("Choose which monitors display the island player")
             Flow {
