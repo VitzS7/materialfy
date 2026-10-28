@@ -337,9 +337,6 @@ impl LyricsFetcher {
         tokio::fs::rename(&tmp, &path).await
     }
 
-    /// Как _fetch_cached в lyrics.py: файл <cache_dir>/<sha1(f"{CACHE_VERSION}|{track_id}")>.json;
-    /// ok — навсегда, not found — NOT_FOUND_TTL_SECS по mtime. Найденное проходит add_gaps(lines, duration).
-    /// Результат с непустым details (источник ответил ошибкой) не кэшируется. Запись — через .part + rename.
     /// Word-level result from the sources that have it, without lines-only fallbacks.
     /// Called after Spotify returned line lyrics: the caller waits a little and, if this is
     /// slow, keeps the line result and lets a background task fill the cache.
@@ -348,7 +345,8 @@ impl LyricsFetcher {
         if let Ok(Some(song)) = sources::ne_search(&http, query).await {
             if let Some(id) = song.get("id") {
                 if let Ok(data) = sources::ne_lyric_by_id(&http, &py_id(id)).await {
-                    let yrc = data.get("yrc")?.get("lyric")?.as_str().unwrap_or("");
+                    // нет YRC — не выход из функции: дальше пробуем Musixmatch
+                    let yrc = data.get("yrc").and_then(|y| y.get("lyric")).and_then(|v| v.as_str()).unwrap_or("");
                     if !yrc.is_empty() {
                         let lines = parse_yrc(yrc);
                         let texts: Vec<String> = lines.iter().map(Line::text).collect();
@@ -366,6 +364,9 @@ impl LyricsFetcher {
         }
     }
 
+    /// Как _fetch_cached в lyrics.py: файл <cache_dir>/<sha1(f"{CACHE_VERSION}|{track_id}")>.json;
+    /// ok — навсегда, not found — NOT_FOUND_TTL_SECS по mtime. Найденное проходит add_gaps(lines, duration).
+    /// Результат с непустым details (источник ответил ошибкой) не кэшируется. Запись — через .part + rename.
     pub async fn fetch_cached(&self, query: &LyricsQuery, extra: Option<ExtraLrc>) -> LyricsResult {
         if let Some(cached) = self.read_cache(&query.track_id).await {
             return cached;
@@ -374,13 +375,18 @@ impl LyricsFetcher {
         if result.ok && result.source == EXTRA_SOURCE && result.kind == "line" {
             // Spotify knew the lines immediately; a word-level source makes the fill non-linear.
             // Wait a little, then keep the line and finish the upgrade in the background.
-            match tokio::time::timeout(Duration::from_millis(1500), self.word_result(query)).await {
-                Ok(Some(word)) => result = word,
-                _ => {
+            // один запрос: по таймауту он не перезапускается, а дорабатывает в фоне
+            let me = self.clone();
+            let q = query.clone();
+            let mut task = tokio::spawn(async move { me.word_result(&q).await });
+            match tokio::time::timeout(Duration::from_millis(1500), &mut task).await {
+                Ok(Ok(Some(word))) => result = word,
+                Ok(_) => {}
+                Err(_) => {
                     let me = self.clone();
                     let query = query.clone();
                     tokio::spawn(async move {
-                        let Some(mut word) = me.word_result(&query).await else { return };
+                        let Ok(Some(mut word)) = task.await else { return };
                         word.lines = add_gaps(std::mem::take(&mut word.lines), query.duration);
                         if let Err(e) = me.write_cache(&query.track_id, &word).await {
                             tracing::warn!("lyrics: word upgrade {} not cached: {e}", query.track_id);
