@@ -35,7 +35,11 @@ fn main() {
 
     // winframe.cpp, taskbar.cpp и floating.cpp собираются везде (вне Windows — заглушка), чтобы привязки
     // в qt/ffi.rs и winframe.rs не зависели от ОС
-    let cpp = ["cpp/mf_shell.cpp", "cpp/register.cpp", "cpp/taskbar.cpp", "cpp/winframe.cpp", "cpp/floating.cpp"];
+    let mut cpp = vec!["cpp/mf_shell.cpp", "cpp/register.cpp", "cpp/taskbar.cpp", "cpp/winframe.cpp", "cpp/floating.cpp"];
+    // островок над строкой меню и вырез экрана — AppKit
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        cpp.push("cpp/floating_mac.mm");
+    }
 
     // Без QmlModule: он требует, чтобы все мосты лежали в одном каталоге (QTBUG-93443);
     // типы Materialfy.Core регистрирует cpp/register.cpp.
@@ -109,6 +113,7 @@ END
         }
         // dlsym (display.rs: QWindowSystemInterface::handlePrimaryScreenChanged)
         Ok("linux") => println!("cargo::rustc-link-lib=dl"),
+        Ok("macos") => println!("cargo::rustc-link-lib=framework=AppKit"),
         _ => {}
     }
 }
