@@ -31,9 +31,11 @@ Window {
         onTriggered: root.contentItem.grabToImage(result => result.saveToFile(root.shotPath))
     }
 
-    readonly property bool mac: Qt.platform.os === "osx"
-    // на Mac верхние 32 px — вырез: там ничего не видно, содержимое раскрытого островка — под ним
-    readonly property int notchH: mac ? 32 : 0
+    // Вырез экрана Mac (ставит WindowShell.makeToolWindow, cpp/floating_mac.mm): там ничего не видно,
+    // содержимое раскрытого островка — под ним. Без выреза — 0
+    property int notchW: 0
+    property int notchH: 0
+    readonly property bool mac: notchH > 0
     readonly property int ear: 10
 
     readonly property bool motion: !Theme.reducedMotion && !Theme.lowPower
@@ -69,8 +71,8 @@ Window {
         : mode === "announcement" ? 360
         : mode === "peek" ? 260
         : mode === "volume" ? 240
-        : mode === "idle" ? (mac ? 200 : 120)
-        : (mac ? 300 : 164)
+        : mode === "idle" ? (mac ? notchW : 120)
+        : (mac ? notchW + 80 : 164)
     readonly property int targetH: mode === "expanded" ? expandedH
         : mode === "announcement" ? notchH + 52
         : mode === "peek" ? notchH + 44
@@ -84,13 +86,16 @@ Window {
     title: "Materialfy"
     flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
     transientParent: null
-    screen: targetScreen || (mainWindow ? mainWindow.screen : null)
-    x: screen ? (screen.virtualX + Math.round((screen.width - width) / 2)) : 0
-    y: screen ? screen.virtualY : 0
+    // x и y — от целевого экрана, а не от screen: macOS сам переводит окно на экран, где лежат его координаты
+    readonly property var _screen: targetScreen || (mainWindow ? mainWindow.screen : null)
+    screen: _screen
+    x: _screen ? (_screen.virtualX + Math.round((_screen.width - width) / 2)) : 0
+    y: _screen ? _screen.virtualY : 0
 
     property bool _ready: false
     property bool _fullscreen: false
-    visible: _ready && (!_fullscreen || shotPath !== "")
+    // macOS: островок — только в вырезе экрана; экран без выреза его не показывает
+    visible: _ready && (!_fullscreen || shotPath !== "") && (Qt.platform.os !== "osx" || mac)
 
     Component.onCompleted: {
         WindowShell.makeToolWindow(root)
@@ -98,7 +103,8 @@ Window {
         _ready = true
     }
     Component.onDestruction: WindowShell.keyHook(root, false)
-    onVisibleChanged: if (!visible) { _collapse(); WindowShell.keyHook(root, false) }
+    // Qt сбрасывает уровень окна при показе (macOS): снова над строкой меню
+    onVisibleChanged: if (!visible) { _collapse(); WindowShell.keyHook(root, false) } else if (Qt.platform.os === "osx") WindowShell.makeToolWindow(root)
 
     // ---- Курсор: опрос 10 раз в секунду ----
     // В покое — полоса у самой кромки над полоской (курсор «упёрся» в край), на Mac — вырез; иначе — сам островок.
@@ -116,7 +122,7 @@ Window {
         running: root.visible && root.forcedState === ""
         onTriggered: {
             const idle = root.mode === "idle"
-            const zw = idle ? (root.mac ? 220 : 320) : island.width
+            const zw = idle ? (root.mac ? root.notchW + 20 : 320) : island.width
             const zh = idle ? (root.mac ? root.notchH : 3) : island.height
             const hit = WindowShell.cursorIn(root, Math.round((root.width - zw) / 2), 0, Math.round(zw), Math.round(zh))
             const busy = islandMenu.opened || seek.dragging

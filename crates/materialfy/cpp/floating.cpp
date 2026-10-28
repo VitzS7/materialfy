@@ -762,12 +762,14 @@ floating_key_hook(QObject* object, bool on)
 
 namespace mf {
 
+#if !defined(__APPLE__) // macOS — floating_mac.mm
 bool
 floating_tool_window(QObject* window)
 {
   (void)window;
   return false;
 }
+#endif
 
 bool
 floating_fullscreen_on(QObject* window)
