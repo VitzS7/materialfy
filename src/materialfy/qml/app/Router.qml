@@ -135,7 +135,8 @@ Item {
 
     // Переход в раздел верхнего уровня: стек сбрасывается.
     function reset(name, props) {
-        if (_pendingSame(name, props) || (depth === 1 && _same(current, name, props)))
+        // тихий прогрев той же страницы не считается — его отменяем и делаем обычный reset
+        if ((_pendingSame(name, props) && _pending.kind !== "prewarm") || (depth === 1 && _same(current, name, props)))
             return
         if (_pending)
             _cancelPending()                // reset всё равно переписывает стек — инкубация больше не нужна
@@ -152,9 +153,12 @@ Item {
 
     function back() {
         if (_pending !== null) {
-            // Страница ещё не попала в стек: отмена инкубации и есть «назад», стек не трогаем
+            // Страница ещё не попала в стек: отмена инкубации и есть «назад», стек не трогаем.
+            // Тихий прогрев пользователь не видел — его отмена «назад» не съедает
+            const silent = _pending.kind === "prewarm"
             _cancelPending()
-            return true
+            if (!silent)
+                return true
         }
         if (depth < 2)
             return false
@@ -256,8 +260,7 @@ Item {
             _kept[p.name] = item
         }
         if (p.kind === "forward" && stack.some(e => e.item === item)) {
-            // Страница уже открыта в глубине стека: свежую копию сожгли, дубль в стек не добавляем.
-            item.destroy()
+            // Страница уже открыта в глубине стека (свежая копия сожжена выше): дубль в стек не добавляем
             return
         }
         // LRU — только страницам с параметрами (плейлисты, артисты): search/account/playback
