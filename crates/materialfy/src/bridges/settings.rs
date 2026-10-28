@@ -71,6 +71,8 @@ pub mod qobject {
         #[qproperty(QString, gpu_preference, cxx_name = "gpuPreference", READ, WRITE = set_gpu_preference, NOTIFY = gpu_preference_changed)]
         /// "system" | "en" | "ru" | "pt"; the applied language and the dictionary — Translations (Md3/I18n.qml)
         #[qproperty(QString, language, READ, WRITE = set_language, NOTIFY = language_changed)]
+        /// 75 | 100 | 125 | 150 | 200 — QT_SCALE_FACTOR, after a restart
+        #[qproperty(i32, ui_scale, cxx_name = "uiScale", READ, WRITE = set_ui_scale, NOTIFY = ui_scale_changed)]
         #[qproperty(bool, right_panel_open, cxx_name = "rightPanelOpen", READ, WRITE = set_right_panel_open, NOTIFY = right_panel_open_changed)]
         #[qproperty(QString, right_panel_tab, cxx_name = "rightPanelTab", READ, WRITE = set_right_panel_tab, NOTIFY = right_panel_tab_changed)]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed", READ, WRITE = set_sidebar_collapsed, NOTIFY = sidebar_collapsed_changed)]
@@ -166,6 +168,7 @@ pub mod qobject {
         fn set_low_power_mode(self: Pin<&mut Settings>, value: QString);
         fn set_gpu_preference(self: Pin<&mut Settings>, value: QString);
         fn set_language(self: Pin<&mut Settings>, value: QString);
+        fn set_ui_scale(self: Pin<&mut Settings>, value: i32);
         fn set_right_panel_open(self: Pin<&mut Settings>, value: bool);
         fn set_right_panel_tab(self: Pin<&mut Settings>, value: QString);
         fn set_sidebar_collapsed(self: Pin<&mut Settings>, value: bool);
@@ -308,6 +311,9 @@ pub mod qobject {
         #[qsignal]
         #[cxx_name = "languageChanged"]
         fn language_changed(self: Pin<&mut Settings>);
+        #[qsignal]
+        #[cxx_name = "uiScaleChanged"]
+        fn ui_scale_changed(self: Pin<&mut Settings>);
         #[qsignal]
         #[cxx_name = "rightPanelOpenChanged"]
         fn right_panel_open_changed(self: Pin<&mut Settings>);
@@ -464,6 +470,14 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "applyEngineSettings"]
         fn apply_engine_settings(self: Pin<&mut Settings>);
+        /// Reopen the app: the interface scale is read only when Qt starts.
+        #[qinvokable]
+        #[cxx_name = "relaunch"]
+        fn relaunch(self: &Settings);
+        /// The scale this process started with: a relaunch is needed while uiScale differs from it.
+        #[qinvokable]
+        #[cxx_name = "uiScaleAtLaunch"]
+        fn ui_scale_at_launch(self: &Settings) -> i32;
         /// Применить прокси (пароль — в хранилище секретов, не в настройки).
         #[qinvokable]
         #[cxx_name = "applyProxy"]
@@ -640,6 +654,7 @@ settings! {
     low_power_mode: QString = LowPowerMode, set_low_power_mode, low_power_mode_changed;
     gpu_preference: QString = GpuPreference, set_gpu_preference, gpu_preference_changed;
     language: QString = Language, set_language, language_changed;
+    ui_scale: i32 = UiScale, set_ui_scale, ui_scale_changed;
     right_panel_open: bool = RightPanelOpen, set_right_panel_open, right_panel_open_changed;
     right_panel_tab: QString = RightPanelTab, set_right_panel_tab, right_panel_tab_changed;
     sidebar_collapsed: bool = SidebarCollapsed, set_sidebar_collapsed, sidebar_collapsed_changed;
@@ -746,6 +761,53 @@ impl qobject::Settings {
 
     fn apply_engine_settings(self: Pin<&mut Self>) {
         ctx().services.auth.restart_engine();
+    }
+
+    /// Reopen the app after a setting that Qt reads only at startup (the interface scale).
+    /// The AppImage is the executable; a plain build relaunches its own binary. The shell
+    /// waits for this process to exit, so the new one finds the config and the MPRIS name free.
+    fn ui_scale_at_launch(&self) -> i32 {
+        // engine::apply_ui_scale sets the marker; without it QT_SCALE_FACTOR came from the user and the setting does nothing
+        std::env::var("MATERIALFY_UI_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(*self.ui_scale())
+    }
+
+    fn relaunch(&self) {
+        let exe = std::env::var_os("APPIMAGE")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_exe().ok());
+        let Some(exe) = exe else { return };
+        let pid = std::process::id();
+        #[cfg(unix)]
+        {
+            let script =
+                format!("while kill -0 {pid} 2>/dev/null; do sleep 0.1; done; exec \"$0\"");
+            let _ = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .arg(&exe)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let path = exe.display().to_string().replace('\'', "''");
+            let script = format!(
+                "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath '{path}'"
+            );
+            // like the updater: powershell from System32, not from PATH
+            let powershell = std::env::var_os("SystemRoot")
+                .map(|root| std::path::PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+                .filter(|p| p.is_file())
+                .unwrap_or_else(|| "powershell.exe".into());
+            let _ = std::process::Command::new(powershell)
+                .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+                .creation_flags(0x0000_0200 | 0x0800_0000) // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+                .spawn();
+        }
+        crate::qt::ffi::ffi::post_quit();
     }
 
     fn apply_proxy(

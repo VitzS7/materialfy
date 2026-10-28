@@ -28,6 +28,9 @@ Page {
         { key: "updates", text: I18n.t("Updates"), icon: "download" }
     ]
     property string currentSection: "account"
+    // The scale is read by Qt at launch: after a change, offer a one-click relaunch.
+    // The launch scale comes from the process, not the page, which is rebuilt.
+    readonly property bool scalePending: Settings.uiScale !== Settings.uiScaleAtLaunch()
 
     readonly property int screenCount: Qt.application.screens ? Qt.application.screens.length : 1
 
@@ -626,6 +629,16 @@ Page {
         title: I18n.t("Appearance")
         icon: "palette"
 
+        SettingsBanner {
+            kind: "info"
+            icon: "restart_alt"
+            shown: page.scalePending
+            title: I18n.t("Restart to apply the scale")
+            text: I18n.t("The interface scale is read when the app starts. Apply now reopens the app at the new size.")
+            actionText: I18n.t("Apply now")
+            onAction: Settings.relaunch()
+        }
+
         SettingRow {
             title: I18n.t("Language")
             // "system" (default) follows the OS UI language; the language names stay in their own language
@@ -646,6 +659,18 @@ Page {
                 size: page.compact ? "xs" : "s"
                 currentIndex: ["system", "light", "dark"].indexOf(Settings.themeMode)
                 onActivated: i => Settings.themeMode = ["system", "light", "dark"][i]
+            }
+        }
+
+        SettingRow {
+            title: I18n.t("Interface scale")
+            description: I18n.t("Size of text and controls. Takes effect after restarting the app")
+            ButtonGroup {
+                model: ["75%", "100%", "125%", "150%", "200%"]
+                autoSelect: false
+                size: page.compact ? "xs" : "s"
+                currentIndex: Math.max(0, [75, 100, 125, 150, 200].indexOf(Settings.uiScale))
+                onActivated: i => Settings.uiScale = [75, 100, 125, 150, 200][i]
             }
         }
 
