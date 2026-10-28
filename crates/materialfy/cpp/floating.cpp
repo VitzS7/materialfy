@@ -433,11 +433,19 @@ move_window(QWindow* window, HWND hwnd, const Bar& bar, bool embed, LONG x, int 
   return 2;
 }
 
+// Масштаб окна на панели: DPI самой панели × масштаб интерфейса. Не devicePixelRatio окна — до переезда
+// на панель он берётся с экрана, где окно было, и на мониторах с разным DPI первое размещение ошибается.
+double
+window_scale(const Bar& bar)
+{
+  const double user = qEnvironmentVariable("QT_SCALE_FACTOR", QStringLiteral("1")).toDouble();
+  return bar.scale * (user > 0 ? user : 1.0);
+}
+
 int
 size_h(const Bar& bar, int height, double scale)
 {
-  // Высота окна — в его собственных физических пикселях (devicePixelRatio уже включает масштаб
-  // интерфейса), а предел по высоте панели — в пикселях панели (bar.scale).
+  // Высота окна — с масштабом интерфейса (window_scale), предел по высоте панели — в пикселях панели (bar.scale).
   return std::min(px(height, scale), static_cast<int>(bar.rect.bottom - bar.rect.top) - 2 * px(4, bar.scale));
 }
 
@@ -667,7 +675,7 @@ floating_taskbar_place(QObject* object, int width, int height, bool embed, const
     release_host(window);
     return 0;
   }
-  const double scale = window->devicePixelRatio();
+  const double scale = window_scale(bar);
   const int w = px(width, scale);
   const int h = size_h(bar, height, scale);
   // кнопки панели нужны только местам у значков и у левого края — у трея хватает TrayNotifyWnd
@@ -699,7 +707,7 @@ floating_taskbar_drag(QObject* object, int width, int height, int phase)
   RECT now{};
   if (!hwnd || !IsWindow(hwnd) || !read_bar(window, bar) || !GetCursorPos(&cursor) || !GetWindowRect(hwnd, &now))
     return {};
-  const double scale = window->devicePixelRatio();
+  const double scale = window_scale(bar);
   const int w = px(width, scale);
   if (phase == 0) {
     drag.grab = cursor.x - now.left;

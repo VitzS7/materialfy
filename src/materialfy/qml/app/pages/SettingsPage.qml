@@ -29,9 +29,8 @@ Page {
     ]
     property string currentSection: "account"
     // The scale is read by Qt at launch: after a change, offer a one-click relaunch.
-    property bool scalePending: false
-    // The scale the running process started with: going back to it clears the banner.
-    property int scaleAtLaunch: 100
+    // The launch scale comes from the process, not the page, which is rebuilt.
+    readonly property bool scalePending: Settings.uiScale !== Settings.uiScaleAtLaunch()
 
     readonly property int screenCount: Qt.application.screens ? Qt.application.screens.length : 1
 
@@ -207,7 +206,6 @@ Page {
     }
 
     Component.onCompleted: {
-        scaleAtLaunch = Settings.uiScale
         Settings.refreshAudioDevices()
         Settings.refreshCacheUsage()
         if (signedIn)
@@ -638,10 +636,7 @@ Page {
             title: I18n.t("Restart to apply the scale")
             text: I18n.t("The interface scale is read when the app starts. Apply now reopens the app at the new size.")
             actionText: I18n.t("Apply now")
-            onAction: {
-                page.scalePending = false
-                Settings.relaunch()
-            }
+            onAction: Settings.relaunch()
         }
 
         SettingRow {
@@ -675,13 +670,7 @@ Page {
                 autoSelect: false
                 size: page.compact ? "xs" : "s"
                 currentIndex: Math.max(0, [75, 100, 125, 150, 200].indexOf(Settings.uiScale))
-                onActivated: i => {
-                    const value = [75, 100, 125, 150, 200][i]
-                    if (value !== Settings.uiScale) {
-                        Settings.uiScale = value
-                        page.scalePending = value !== page.scaleAtLaunch
-                    }
-                }
+                onActivated: i => Settings.uiScale = [75, 100, 125, 150, 200][i]
             }
         }
 

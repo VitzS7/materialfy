@@ -474,6 +474,10 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "relaunch"]
         fn relaunch(self: &Settings);
+        /// The scale this process started with: a relaunch is needed while uiScale differs from it.
+        #[qinvokable]
+        #[cxx_name = "uiScaleAtLaunch"]
+        fn ui_scale_at_launch(self: &Settings) -> i32;
         /// Применить прокси (пароль — в хранилище секретов, не в настройки).
         #[qinvokable]
         #[cxx_name = "applyProxy"]
@@ -762,6 +766,11 @@ impl qobject::Settings {
     /// Reopen the app after a setting that Qt reads only at startup (the interface scale).
     /// The AppImage is the executable; a plain build relaunches its own binary. The shell
     /// waits for this process to exit, so the new one finds the config and the MPRIS name free.
+    fn ui_scale_at_launch(&self) -> i32 {
+        // engine::apply_ui_scale sets the marker; without it QT_SCALE_FACTOR came from the user and the setting does nothing
+        std::env::var("MATERIALFY_UI_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(*self.ui_scale())
+    }
+
     fn relaunch(&self) {
         let exe = std::env::var_os("APPIMAGE")
             .map(std::path::PathBuf::from)
@@ -771,7 +780,7 @@ impl qobject::Settings {
         #[cfg(unix)]
         {
             let script =
-                format!("while kill -0 {pid} 2>/dev/null; do sleep 0.1; done; exec \"$0\" --new-instance");
+                format!("while kill -0 {pid} 2>/dev/null; do sleep 0.1; done; exec \"$0\"");
             let _ = std::process::Command::new("/bin/sh")
                 .arg("-c")
                 .arg(script)
@@ -786,11 +795,16 @@ impl qobject::Settings {
             use std::os::windows::process::CommandExt;
             let path = exe.display().to_string().replace('\'', "''");
             let script = format!(
-                "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath '{path}' -ArgumentList '--new-instance'"
+                "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath '{path}'"
             );
-            let _ = std::process::Command::new("powershell.exe")
+            // like the updater: powershell from System32, not from PATH
+            let powershell = std::env::var_os("SystemRoot")
+                .map(|root| std::path::PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+                .filter(|p| p.is_file())
+                .unwrap_or_else(|| "powershell.exe".into());
+            let _ = std::process::Command::new(powershell)
                 .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-                .creation_flags(0x0800_0000)
+                .creation_flags(0x0000_0200 | 0x0800_0000) // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
                 .spawn();
         }
         crate::qt::ffi::ffi::post_quit();
