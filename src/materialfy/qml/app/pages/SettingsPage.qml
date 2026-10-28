@@ -171,8 +171,9 @@ Page {
     function _followScroll() {
         if (!_following)
             return
-        const viewTop = page.flickable.contentY
-        const viewBottom = viewTop + page.flickable.height
+        // строка разделов прилипает сверху и закрывает полосу под собой — как в _cardY
+        const viewTop = page.flickable.contentY + nav.height + 16
+        const viewBottom = page.flickable.contentY + page.flickable.height
         let cur = currentSection
         let best = 0
         // смотрим на видимую площадь, а не на верх карточки: следующая может начинаться
@@ -183,11 +184,15 @@ Page {
                 continue
             const top = _cardTop(card)
             const visible = Math.min(top + card.height, viewBottom) - Math.max(top, viewTop)
-            if (visible > best) {
-                best = visible
+            // доля того, что карточка вообще может показать: короткая целиком на экране не проигрывает высокой соседке
+            const score = visible / Math.max(1, Math.min(card.height, viewBottom - viewTop))
+            if (score > best) {
+                best = score
                 cur = s.key
             }
         }
+        if (page.flickable.contentY <= page.flickable.originY + 2)
+            cur = sections[0].key
         if (page.flickable.contentY >= page.flickable.maxY - 2)
             cur = sections[sections.length - 1].key
         currentSection = cur
