@@ -24,6 +24,8 @@ class MobileShell : public QObject
   // Уведомление плеера (Android): в цвет обложки и сердце «в любимые» в карточке плеера системы
   Q_PROPERTY(bool mediaColorized READ mediaColorized WRITE setMediaColorized NOTIFY mediaOptionsChanged)
   Q_PROPERTY(bool mediaLikeButton READ mediaLikeButton WRITE setMediaLikeButton NOTIFY mediaOptionsChanged)
+  // Фон уведомления плеера: "cover" (цвет обложки) или "canvas" (кадр Canvas трека)
+  Q_PROPERTY(QString mediaBackground READ mediaBackground WRITE setMediaBackground NOTIFY mediaOptionsChanged)
 
 public:
   explicit MobileShell(QObject* parent = nullptr);
@@ -40,6 +42,10 @@ public:
   void setMediaColorized(bool on) { setMediaOption(QStringLiteral("mediaColorized"), on); }
   bool mediaLikeButton() const { return mediaOption(QStringLiteral("mediaLikeButton")); }
   void setMediaLikeButton(bool on) { setMediaOption(QStringLiteral("mediaLikeButton"), on); }
+  QString mediaBackground() const;
+  void setMediaBackground(const QString& value);
+  // Canvas текущего трека для фона уведомления (пустая строка: нет); на десктопе ничего не делает
+  Q_INVOKABLE void setMediaCanvas(const QString& url);
 
   // Состояние плеера → MediaSession и уведомление (Android). hasTrack=false — убрать уведомление;
   // local=false — играет другое устройство (Connect): без аудиофокуса и блокировок сна.

@@ -87,7 +87,10 @@ Window {
     function _queueMediaSync() { Qt.callLater(win.syncMedia) }
     Connections {
         target: Player
-        function onTrackChanged() { win._queueMediaSync() }
+        function onTrackChanged() {
+            win._queueMediaSync()
+            win._askMediaCanvas()
+        }
         function onStateChanged() { win._queueMediaSync() }
         function onCoverFileChanged() { win._queueMediaSync() }
         function onDeviceChanged() { win._queueMediaSync() }
@@ -121,6 +124,20 @@ Window {
             case "like": if (Player.uri !== "") Library.toggleSaved(Player.uri); break   // сердце карточки плеера
             }
         }
+    }
+
+    // Фон уведомления «Canvas»: ссылку на видео трека спрашиваем только в этом режиме, кадр берёт Java-часть
+    readonly property bool _canvasBackground: MobileShell.android && MobileShell.mediaBackground === "canvas"
+    property string _canvasFor: ""
+    on_CanvasBackgroundChanged: { _canvasFor = ""; _askMediaCanvas() }
+    function _askMediaCanvas() {
+        const id = _canvasBackground && !Player.isEpisode ? Player.trackId : ""
+        if (id === _canvasFor)
+            return
+        _canvasFor = id
+        MobileShell.setMediaCanvas("")
+        if (id !== "")
+            Catalog.requestCanvas(id)
     }
 
     // Вход в браузере: на время ожидания ответа процесс держит короткий foreground-сервис (иначе Android может
@@ -389,6 +406,10 @@ Window {
         // наведения на телефоне нет — карточка исполнителя не нужна
         function onPreviewRequested(id, x, y, w) {}
         function onPreviewCancelled() {}
+        function onCanvasReady(trackId, url) {
+            if (win._canvasBackground && trackId === win._canvasFor)
+                MobileShell.setMediaCanvas(url)
+        }
         function onChooseArtist(refs) {
             artistMenu.refs = refs
             artistMenu.open(refs.map(r => ({ text: r.name, icon: "person" })), Qt.point(0, 0))

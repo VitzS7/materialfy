@@ -22,6 +22,7 @@ import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
+import android.media.MediaMetadataRetriever;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.net.wifi.WifiManager;
@@ -33,9 +34,14 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -75,6 +81,8 @@ public class PlaybackService extends Service
     private static State latest = new State();
     private static PlaybackService running;
     private static boolean starting;
+    // ссылка на Canvas текущего трека (MobileMain спрашивает её, только когда фон уведомления по Canvas)
+    private static String latestCanvas = "";
 
     private MediaSession session;
     private NotificationManager notifications;
@@ -88,6 +96,8 @@ public class PlaybackService extends Service
     private WifiManager.WifiLock wifiLock;
 
     private final ExecutorService loader = Executors.newSingleThreadExecutor();
+    // Canvas качается отдельно: видео в несколько мегабайт не должно задерживать обложку следующего трека
+    private final ExecutorService canvasLoader = Executors.newSingleThreadExecutor();
     private final IslandNotification island = new IslandNotification();
     // прогресс в острове системы: раз в секунду на включённом экране, иначе раз в 10 с (см. IslandNotification.tickMs)
     private final Runnable islandTick = new Runnable() {
@@ -107,6 +117,13 @@ public class PlaybackService extends Service
     // ползунок полоски острова: рисуется под цвет акцента, перерисовывается, только когда цвет сменился
     private Bitmap handle;
     private int handleColor;
+    // фон «Canvas»: кадр видео вместо обложки в карточке плеера (видео уведомление не проигрывает)
+    private String canvasUrl = "";
+    private Bitmap canvasFrame;
+    private final Map<String, Bitmap> canvasFrames = new LinkedHashMap<String, Bitmap>(8, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Bitmap> eldest) { return size() > 6; }
+    };
 
     private final BroadcastReceiver noisy = new BroadcastReceiver() {
         @Override
@@ -153,6 +170,16 @@ public class PlaybackService extends Service
             if (latest.liked == liked)
                 return;
             latest.liked = liked;
+            if (running != null)
+                running.apply();
+        });
+    }
+
+    // Canvas текущего трека для фона уведомления (пустая строка: нет или ещё не пришёл)
+    static void setCanvas(String url)
+    {
+        MAIN.post(() -> {
+            latestCanvas = url == null ? "" : url;
             if (running != null)
                 running.apply();
         });
@@ -251,6 +278,7 @@ public class PlaybackService extends Service
     {
         shutdown();
         loader.shutdownNow();
+        canvasLoader.shutdownNow();
         super.onDestroy();
     }
 
@@ -297,13 +325,23 @@ public class PlaybackService extends Service
             thumb = null;
             loadCover(coverUrl);
         }
+        String wantCanvas = "canvas".equals(IslandNotification.choice(this, IslandNotification.KEY_BACKGROUND))
+                                ? latestCanvas : "";
+        if (!wantCanvas.equals(canvasUrl)) {
+            canvasUrl = wantCanvas;
+            canvasFrame = canvasFrames.get(wantCanvas);
+            if (canvasFrame == null && !wantCanvas.isEmpty())
+                loadCanvas(wantCanvas);
+        }
+        // нет Canvas или кадр не достался: фон по обложке, как обычно
+        Bitmap art = canvasFrame != null ? canvasFrame : cover;
         MediaMetadata.Builder meta = new MediaMetadata.Builder()
             .putString(MediaMetadata.METADATA_KEY_TITLE, s.title)
             .putString(MediaMetadata.METADATA_KEY_ARTIST, s.artist)
             .putString(MediaMetadata.METADATA_KEY_ALBUM, s.album)
             .putLong(MediaMetadata.METADATA_KEY_DURATION, s.durationMs);
-        if (cover != null)
-            meta.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, cover);
+        if (art != null)
+            meta.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art);
         session.setMetadata(meta.build());
 
         long actions = PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE
@@ -361,7 +399,7 @@ public class PlaybackService extends Service
         now.clockRunning = s.clockRunning;
         now.hasTrack = s.hasTrack;
         PendingIntent open = session != null ? session.getController().getSessionActivity() : null;
-        int accent = IslandNotification.accent(thumb, 0xFF3A3A5C);
+        int accent = IslandNotification.accent(tint(), 0xFF3A3A5C);
         if (handle == null || handleColor != accent) {
             handleColor = accent;
             handle = handleBitmap(accent);
@@ -369,6 +407,12 @@ public class PlaybackService extends Service
         island.update(this, now, thumb, accent, handle, open,
                       s.canPrevious ? action(R.drawable.ic_skip_previous, R.string.previous, "previous") : null,
                       playPause(s.playing), s.canNext ? action(R.drawable.ic_skip_next, R.string.next, "next") : null);
+    }
+
+    // откуда цвет уведомления: кадр Canvas, если он фон, иначе обложка
+    private Bitmap tint()
+    {
+        return canvasFrame != null ? canvasFrame : thumb;
     }
 
     private Notification.Action playPause(boolean playing)
@@ -395,7 +439,7 @@ public class PlaybackService extends Service
         if (thumb != null) {
             b.setLargeIcon(thumb);
             // карточка в цвет обложки, как плавающий остров на ПК (можно выключить в настройках)
-            b.setColor(IslandNotification.accent(thumb, 0xFF3A3A5C))
+            b.setColor(IslandNotification.accent(tint(), 0xFF3A3A5C))
                 .setColorized(IslandNotification.option(this, IslandNotification.KEY_COLORIZE));
         }
         b.addAction(action(R.drawable.ic_skip_previous, R.string.previous, "previous"));
@@ -570,5 +614,56 @@ public class PlaybackService extends Service
         new Canvas(out).drawRoundRect(new RectF((size - w) / 2f, (size - h) / 2f, (size + w) / 2f, (size + h) / 2f),
                                       w / 2f, w / 2f, paint);
         return out;
+    }
+
+    // Кадр Canvas: видео скачивается во временный файл (у MediaMetadataRetriever со ссылкой нет таймаутов,
+    // поток мог бы повиснуть), берётся кадр на первой секунде. При любой ошибке фон остаётся по обложке
+    private void loadCanvas(String url)
+    {
+        canvasLoader.execute(() -> {
+            Bitmap frame = null;
+            File file = new File(getCacheDir(), "canvas-frame.mp4");
+            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+                connection.setConnectTimeout(10000);
+                connection.setReadTimeout(15000);
+                try (InputStream in = connection.getInputStream(); OutputStream out = new FileOutputStream(file)) {
+                    byte[] buffer = new byte[64 * 1024];
+                    long total = 0;
+                    for (int n; (n = in.read(buffer)) > 0;) {
+                        total += n;
+                        // Canvas это несколько секунд видео, обычно до 5 МБ; что больше, то не он
+                        if (total > 20L * 1024 * 1024)
+                            throw new java.io.IOException("canvas too large");
+                        out.write(buffer, 0, n);
+                    }
+                } finally {
+                    connection.disconnect();
+                }
+                retriever.setDataSource(file.getPath());
+                Bitmap raw = retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                if (raw != null)
+                    frame = scaled(raw, 640);
+            } catch (Exception e) {
+                android.util.Log.w("materialfy", "canvas frame: " + e);
+            } finally {
+                try {
+                    retriever.release();
+                } catch (Exception e) {
+                    // освобождение не удалось: на кадр это уже не влияет
+                }
+                file.delete();
+            }
+            final Bitmap result = frame;
+            MAIN.post(() -> {
+                if (result != null)
+                    canvasFrames.put(url, result);
+                if (!url.equals(canvasUrl) || result == null)
+                    return;
+                canvasFrame = result;
+                apply();
+            });
+        });
     }
 }

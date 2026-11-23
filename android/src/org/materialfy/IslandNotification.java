@@ -34,6 +34,8 @@ final class IslandNotification
     // текстом (иконки действий в обычном шаблоне не показываются, а свою разметку повышенному уведомлению нельзя),
     // поэтому по умолчанию остров это карточка медиа с иконками
     private static final String KEY_STYLE = "islandStyle";
+    // фон уведомления: "cover" (цвет и картинка обложки) или "canvas" (кадр Canvas трека)
+    static final String KEY_BACKGROUND = "mediaBackground";
     // Настройки → Воспроизведение: уведомление плеера в цвет обложки и сердце в карточке плеера (по умолчанию да)
     static final String KEY_COLORIZE = "mediaColorized";
     static final String KEY_LIKE = "mediaLikeButton";
@@ -124,7 +126,8 @@ final class IslandNotification
 
     static String choice(Context context, String key)
     {
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(key, "media");
+        String fallback = KEY_BACKGROUND.equals(key) ? "cover" : "media";
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(key, fallback);
     }
 
     static void setChoice(Context context, String key, String value)

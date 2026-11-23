@@ -6,5 +6,10 @@
   "A separate Live Update with the progress bar. Android draws its buttons as text": "Отдельный Live Update с полоской прогресса. Его кнопки Android рисует текстом",
   "The system media card with icon buttons and the seek bar, like other players": "Карточка медиа системы с кнопками-значками и полоской перемотки, как у других плееров",
   "Media card": "Карточка медиа",
-  "Live Update": "Live Update"
+  "Live Update": "Live Update",
+  "Notification background": "Фон уведомления",
+  "A still frame of the track's Canvas: a notification can't play video. Tracks without Canvas use the cover": "Неподвижный кадр Canvas трека: видео в уведомлении не проигрывается. У треков без Canvas будет обложка",
+  "The album cover and its color": "Обложка альбома и её цвет",
+  "Cover": "Обложка",
+  "Canvas frame": "Кадр Canvas"
 }

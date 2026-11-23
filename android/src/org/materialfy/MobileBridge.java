@@ -142,6 +142,21 @@ public final class MobileBridge
         PlaybackService.refresh();
     }
 
+    // Выбор из нескольких вариантов: "mediaBackground" ("cover" / "canvas")
+    public static String mediaChoice(Context context, String key) { return IslandNotification.choice(context, key); }
+
+    public static void setMediaChoice(Context context, String key, String value)
+    {
+        IslandNotification.setChoice(context, key, value);
+        PlaybackService.refresh();
+    }
+
+    // Ссылка на Canvas текущего трека для фона уведомления (пустая строка: нет)
+    public static void setMediaCanvas(String url)
+    {
+        PlaybackService.setCanvas(url);
+    }
+
     // Что мешает музыке играть в фоне (через запятую): "battery" — оптимизация батареи, "notifications" — уведомления
     // выключены, "promoted" — Live Update (остров) запрещён, "autostart" — у оболочки есть свой список автозапуска
     // (его состояние прочитать нельзя, поэтому пункт показывается всегда, пока пользователь его не отметил)

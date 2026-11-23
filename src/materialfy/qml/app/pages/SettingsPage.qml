@@ -1683,6 +1683,20 @@ Page {
             Switch { checked: MobileShell.mediaLikeButton; onToggled: c => MobileShell.mediaLikeButton = c }
         }
         SettingRow {
+            visible: MobileShell.android
+            title: I18n.t("Notification background")
+            description: MobileShell.mediaBackground === "canvas"
+                ? I18n.t("A still frame of the track's Canvas: a notification can't play video. Tracks without Canvas use the cover")
+                : I18n.t("The album cover and its color")
+            MenuField {
+                leadingIcon: "photo"
+                model: [{ id: "cover", text: I18n.t("Cover") }, { id: "canvas", text: I18n.t("Canvas frame") }]
+                currentValue: MobileShell.mediaBackground
+                onActivated: v => MobileShell.mediaBackground = v
+            }
+        }
+
+        SettingRow {
             title: I18n.t("Report plays to Spotify")
             description: I18n.t("Songs played on this computer count in Recently played, your stats and Wrapped, like in the official app. Sends Spotify one event per song. Unofficial: Spotify may ignore it")
             Switch { checked: Settings.reportPlays; onToggled: c => Settings.reportPlays = c }

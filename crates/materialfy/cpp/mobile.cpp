@@ -220,6 +220,53 @@ MobileShell::setMediaOption(const QString& key, bool on)
 #endif
 }
 
+QString
+MobileShell::mediaBackground() const
+{
+#if defined(Q_OS_ANDROID)
+  const QJniObject value = QJniObject::callStaticObjectMethod(BRIDGE,
+                                                              "mediaChoice",
+                                                              "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                                                              context_object().object(),
+                                                              jstr(QStringLiteral("mediaBackground")).object<jstring>());
+  QJniEnvironment env;
+  env.checkAndClearExceptions();
+  return value.isValid() ? value.toString() : QStringLiteral("cover");
+#else
+  return QStringLiteral("cover");
+#endif
+}
+
+void
+MobileShell::setMediaBackground(const QString& value)
+{
+  if (value == mediaBackground())
+    return;
+#if defined(Q_OS_ANDROID)
+  QJniObject::callStaticMethod<void>(BRIDGE,
+                                     "setMediaChoice",
+                                     "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
+                                     context_object().object(),
+                                     jstr(QStringLiteral("mediaBackground")).object<jstring>(),
+                                     jstr(value).object<jstring>());
+  QJniEnvironment env;
+  env.checkAndClearExceptions();
+  emit mediaOptionsChanged();
+#endif
+}
+
+void
+MobileShell::setMediaCanvas(const QString& url)
+{
+#if defined(Q_OS_ANDROID)
+  QJniObject::callStaticMethod<void>(BRIDGE, "setMediaCanvas", "(Ljava/lang/String;)V", jstr(url).object<jstring>());
+  QJniEnvironment env;
+  env.checkAndClearExceptions();
+#else
+  Q_UNUSED(url)
+#endif
+}
+
 QStringList
 MobileShell::backgroundIssues() const
 {

@@ -6,5 +6,10 @@
   "A separate Live Update with the progress bar. Android draws its buttons as text": "Um Live Update separado com a barra de progresso. O Android desenha os botões dele como texto",
   "The system media card with icon buttons and the seek bar, like other players": "O card de mídia do sistema com botões de ícone e a barra de busca, como outros players",
   "Media card": "Card de mídia",
-  "Live Update": "Live Update"
+  "Live Update": "Live Update",
+  "Notification background": "Fundo da notificação",
+  "A still frame of the track's Canvas: a notification can't play video. Tracks without Canvas use the cover": "Um quadro parado do Canvas da faixa: notificação não reproduz vídeo. Faixas sem Canvas usam a capa",
+  "The album cover and its color": "A capa do álbum e a cor dela",
+  "Cover": "Capa",
+  "Canvas frame": "Quadro do Canvas"
 }
