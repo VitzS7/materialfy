@@ -41,6 +41,8 @@ final class IslandNotification
     private String lastKey = "";
     private boolean lastClockRunning;
     private long lastAt;
+    private long lastPosition;
+    private long lastDuration;
 
     static boolean isVivo()
     {
@@ -55,7 +57,8 @@ final class IslandNotification
         if (isVivo())
             return SLOW_INTERVAL_MS;
         android.os.PowerManager pm = (android.os.PowerManager) context.getSystemService(Context.POWER_SERVICE);
-        return pm != null && pm.isInteractive() ? LIVE_INTERVAL_MS : SLOW_INTERVAL_MS;
+        // в режиме энергосбережения реже: каждое обновление будит процесс и системный интерфейс
+        return pm != null && pm.isInteractive() && !pm.isPowerSaveMode() ? LIVE_INTERVAL_MS : SLOW_INTERVAL_MS;
     }
 
     // Цвет карточки по обложке: средний по насыщенным пикселям (как акцент плеера на ПК)
@@ -123,12 +126,17 @@ final class IslandNotification
         String key = s.title + "\u0000" + s.artist;
         long now = SystemClock.elapsedRealtime();
         // тот же трек — не чаще интервала (между обновлениями время ведёт таймер чипа)
-        if (key.equals(lastKey) && s.clockRunning == lastClockRunning && now - lastAt < tickMs(context) - 50)
+        // перемотку и пришедшую длительность показать сразу, иначе на vivo и при выключенном экране полоска стояла бы до 10 с
+        long expected = lastPosition + (lastClockRunning ? now - lastAt : 0);
+        boolean jumped = Math.abs(s.positionMs - expected) > 1500 || s.durationMs != lastDuration;
+        if (key.equals(lastKey) && s.clockRunning == lastClockRunning && !jumped && now - lastAt < tickMs(context) - 50)
             return;
         boolean newTrack = !key.equals(lastKey);
         lastKey = key;
         lastClockRunning = s.clockRunning;
         lastAt = now;
+        lastPosition = s.positionMs;
+        lastDuration = s.durationMs;
 
         ensureChannel(context, nm);
         int progress = s.durationMs > 0 ? (int) Math.max(0, Math.min(1000, s.positionMs * 1000 / s.durationMs)) : 0;
