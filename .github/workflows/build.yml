@@ -282,7 +282,7 @@ jobs:
           key: player-tests
       - run: cargo test --locked -p md3-model --lib && cargo test --locked -p sf-player --lib && cargo test --locked -p librespot-connect --lib context_resolver::tests
 
-  qml-regressions:
+  qml-interactions:
     name: QML interactions
     runs-on: ubuntu-24.04
     timeout-minutes: 10
