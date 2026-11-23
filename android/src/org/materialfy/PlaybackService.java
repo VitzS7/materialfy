@@ -361,9 +361,14 @@ public class PlaybackService extends Service
         now.clockRunning = s.clockRunning;
         now.hasTrack = s.hasTrack;
         PendingIntent open = session != null ? session.getController().getSessionActivity() : null;
-        island.update(this, now, thumb, tracker, open, s.canPrevious ? action(android.R.drawable.ic_media_previous, R.string.previous, "previous") : null,
-                      action(android.R.drawable.ic_media_pause, R.string.pause, "pause"),
-                      s.canNext ? action(android.R.drawable.ic_media_next, R.string.next, "next") : null);
+        island.update(this, now, thumb, tracker, open,
+                      s.canPrevious ? action(R.drawable.ic_skip_previous, R.string.previous, "previous") : null,
+                      playPause(s.playing), s.canNext ? action(R.drawable.ic_skip_next, R.string.next, "next") : null);
+    }
+
+    private Notification.Action playPause(boolean playing)
+    {
+        return playing ? action(R.drawable.ic_pause, R.string.pause, "pause") : action(R.drawable.ic_play, R.string.play, "play");
     }
 
     private Notification buildNotification()
@@ -388,10 +393,9 @@ public class PlaybackService extends Service
             b.setColor(IslandNotification.accent(thumb, 0xFF3A3A5C))
                 .setColorized(IslandNotification.option(this, IslandNotification.KEY_COLORIZE));
         }
-        b.addAction(action(android.R.drawable.ic_media_previous, R.string.previous, "previous"));
-        b.addAction(s.playing ? action(android.R.drawable.ic_media_pause, R.string.pause, "pause")
-                              : action(android.R.drawable.ic_media_play, R.string.play, "play"));
-        b.addAction(action(android.R.drawable.ic_media_next, R.string.next, "next"));
+        b.addAction(action(R.drawable.ic_skip_previous, R.string.previous, "previous"));
+        b.addAction(playPause(s.playing));
+        b.addAction(action(R.drawable.ic_skip_next, R.string.next, "next"));
         // до Android 13 карточка плеера берёт кнопки из уведомления, а не из медиасессии: сердце ставим последним,
         // чтобы индексы компактного вида (0, 1, 2) остались за «назад / пауза / вперёд»
         if (s.hasTrack && IslandNotification.option(this, IslandNotification.KEY_LIKE))

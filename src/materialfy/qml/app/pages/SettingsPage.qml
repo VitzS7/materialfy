@@ -1659,8 +1659,15 @@ Page {
         SettingRow {
             visible: MobileShell.islandSupported
             title: I18n.t("Player in the system island")
-            description: I18n.t("Track and progress in the status bar chip, Now Bar, Super Island, Origin Island and similar")
-            Switch { checked: MobileShell.islandEnabled; onToggled: c => MobileShell.islandEnabled = c }
+            description: MobileShell.islandEnabled
+                ? I18n.t("A separate Live Update with the progress bar. Android draws its buttons as text")
+                : I18n.t("The system media card with icon buttons and the seek bar, like other players")
+            MenuField {
+                leadingIcon: "music_note"
+                model: [{ id: "media", text: I18n.t("Media card") }, { id: "live", text: I18n.t("Live Update") }]
+                currentValue: MobileShell.islandEnabled ? "live" : "media"
+                onActivated: v => MobileShell.islandEnabled = v === "live"
+            }
         }
         // Android: вид уведомления плеера (хранится на стороне Java, как и остров)
         SettingRow {
@@ -1675,7 +1682,6 @@ Page {
             description: I18n.t("A heart next to the player buttons on the lock screen and in the notification shade")
             Switch { checked: MobileShell.mediaLikeButton; onToggled: c => MobileShell.mediaLikeButton = c }
         }
-
         SettingRow {
             title: I18n.t("Report plays to Spotify")
             description: I18n.t("Songs played on this computer count in Recently played, your stats and Wrapped, like in the official app. Sends Spotify one event per song. Unofficial: Spotify may ignore it")

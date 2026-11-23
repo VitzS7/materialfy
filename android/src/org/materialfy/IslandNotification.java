@@ -5,7 +5,7 @@
 //  - vivo OriginOS: «атомный остров» читает extras notification.superx.* (сцена MUSIC_PLAYBACK) — так делают
 //    сторонние плееры (MeloX). Музыкальную карточку острова vivo открывает не всем приложениям: если прошивка
 //    не пускает, остаётся обычное уведомление плеера.
-// Включается в Настройки → Воспроизведение («Плеер в острове системы»), по умолчанию — да.
+// Выбирается в Настройки → Воспроизведение («Вид острова»): Live Update или только карточка медиа (по умолчанию).
 package org.materialfy;
 
 import android.app.Notification;
@@ -30,7 +30,10 @@ final class IslandNotification
     private static final String CHANNEL = "island";
     static final int NOTIFICATION_ID = 3;
     private static final String PREFS = "materialfy";
-    private static final String KEY_ENABLED = "islandEnabled";
+    // "live": Live Update с полоской; "media": только карточка плеера системы. Кнопки Live Update система рисует
+    // текстом (иконки действий в обычном шаблоне не показываются, а свою разметку повышенному уведомлению нельзя),
+    // поэтому по умолчанию остров это карточка медиа с иконками
+    private static final String KEY_STYLE = "islandStyle";
     // Настройки → Воспроизведение: уведомление плеера в цвет обложки и сердце в карточке плеера (по умолчанию да)
     static final String KEY_COLORIZE = "mediaColorized";
     static final String KEY_LIKE = "mediaLikeButton";
@@ -46,6 +49,7 @@ final class IslandNotification
     private long lastAt;
     private long lastPosition;
     private long lastDuration;
+    private boolean lastPlaying;
 
     static boolean isVivo()
     {
@@ -110,12 +114,22 @@ final class IslandNotification
 
     static boolean enabled(Context context)
     {
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ENABLED, true);
+        return "live".equals(choice(context, KEY_STYLE));
     }
 
     static void setEnabled(Context context, boolean on)
     {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, on).apply();
+        setChoice(context, KEY_STYLE, on ? "live" : "media");
+    }
+
+    static String choice(Context context, String key)
+    {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(key, "media");
+    }
+
+    static void setChoice(Context context, String key, String value)
+    {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(key, value).apply();
     }
 
     static boolean option(Context context, String key)
@@ -132,7 +146,8 @@ final class IslandNotification
                 Notification.Action previous, Notification.Action playPause, Notification.Action next)
     {
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-        if (!supported() || !enabled(context) || !s.hasTrack || !s.playing || vivoRejected(context)) {
+        // на паузе карточка остаётся (с кнопкой «играть»), убирается вместе с плеером
+        if (!supported() || !enabled(context) || !s.hasTrack || vivoRejected(context)) {
             clear(nm);
             return;
         }
@@ -142,11 +157,13 @@ final class IslandNotification
         // перемотку и пришедшую длительность показать сразу, иначе на vivo и при выключенном экране полоска стояла бы до 10 с
         long expected = lastPosition + (lastClockRunning ? now - lastAt : 0);
         boolean jumped = Math.abs(s.positionMs - expected) > 1500 || s.durationMs != lastDuration;
-        if (key.equals(lastKey) && s.clockRunning == lastClockRunning && !jumped && now - lastAt < tickMs(context) - 50)
+        if (key.equals(lastKey) && s.clockRunning == lastClockRunning && s.playing == lastPlaying && !jumped
+            && now - lastAt < tickMs(context) - 50)
             return;
         boolean newTrack = !key.equals(lastKey);
         lastKey = key;
         lastClockRunning = s.clockRunning;
+        lastPlaying = s.playing;
         lastAt = now;
         lastPosition = s.positionMs;
         lastDuration = s.durationMs;

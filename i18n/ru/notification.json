@@ -2,5 +2,9 @@
   "Notification in the cover color": "Уведомление в цвет обложки",
   "The player notification and the island progress bar take their color from the album cover": "Уведомление плеера и полоска прогресса в острове окрашиваются в цвет обложки альбома",
   "Like button in the notification": "Кнопка «В любимые» в уведомлении",
-  "A heart next to the player buttons on the lock screen and in the notification shade": "Сердце рядом с кнопками плеера на экране блокировки и в шторке уведомлений"
+  "A heart next to the player buttons on the lock screen and in the notification shade": "Сердце рядом с кнопками плеера на экране блокировки и в шторке уведомлений",
+  "A separate Live Update with the progress bar. Android draws its buttons as text": "Отдельный Live Update с полоской прогресса. Его кнопки Android рисует текстом",
+  "The system media card with icon buttons and the seek bar, like other players": "Карточка медиа системы с кнопками-значками и полоской перемотки, как у других плееров",
+  "Media card": "Карточка медиа",
+  "Live Update": "Live Update"
 }
