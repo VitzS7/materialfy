@@ -45,7 +45,7 @@ Window {
         // «Аккаунт», «Воспроизведение» — из настроек; «Любимые», «Новинки», папки — из медиатеки
         if (name === "account" || name === "playback")
             return "settings"
-        if (name === "liked" || name === "releases" || name === "folder")
+        if (name === "liked" || name === "releases" || name === "recents" || name === "folder")
             return "library"
         return "home"
     }
@@ -216,6 +216,11 @@ Window {
                 Row {
                     spacing: 4
                     IconButton {
+                        icon: "history"
+                        Accessible.name: I18n.t("Recents")
+                        onClicked: router.push("recents")
+                    }
+                    IconButton {
                         icon: "new_releases"
                         onClicked: router.push("releases")
                     }
@@ -261,6 +266,7 @@ Window {
                         episode: Qt.resolvedUrl("app/pages/EpisodePage.qml"),
                         radio: Qt.resolvedUrl("app/pages/RadioPage.qml"),
                         releases: Qt.resolvedUrl("app/pages/ReleasesPage.qml"),
+                        recents: Qt.resolvedUrl("app/pages/RecentsPage.qml"),
                         settings: Qt.resolvedUrl("app/pages/SettingsPage.qml"),
                         account: Qt.resolvedUrl("app/pages/AccountPage.qml"),
                         playback: Qt.resolvedUrl("app/pages/PlaybackSetupPage.qml")
@@ -269,7 +275,7 @@ Window {
                     // на каждый тап, на телефоне это заметная пауза
                     // «Любимые» — тоже: сборка ~150 строк занимала до 0,75 с между тапом и переходом
                     keepAlive: ["home", "search", "library", "settings", "liked"]
-                    pushOnReset: ["account", "playback", "liked", "releases", "radio", "folder"]
+                    pushOnReset: ["account", "playback", "liked", "releases", "recents", "radio", "folder"]
                     Component.onCompleted: {
                         Qt.callLater(router._prewarm)
                         const [name, id] = win.startPage.split(":")
