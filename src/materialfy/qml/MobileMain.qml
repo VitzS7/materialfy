@@ -92,15 +92,18 @@ Window {
         function onCoverFileChanged() { win._queueMediaSync() }
         function onDeviceChanged() { win._queueMediaSync() }
         // позицию система продолжает сама; обновляем после перемотки (скачок больше 2 с от ожидаемой)
+        // и когда длительность пришла позже трека (без неё у карточки плеера нет полоски)
         property real _at: 0
         property real _pos: 0
+        property int _duration: 0
         function onPositionChanged() {
             const now = Date.now()
             const expected = _pos + (Player.playing && !Player.narrating && !Player.buffering ? now - _at : 0)
-            if (Math.abs(Player.positionMs - expected) > 2000)
+            if (Math.abs(Player.positionMs - expected) > 2000 || Player.durationMs !== _duration)
                 win._queueMediaSync()
             _at = now
             _pos = Player.positionMs
+            _duration = Player.durationMs
         }
     }
     Connections {
