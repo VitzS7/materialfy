@@ -164,8 +164,8 @@ final class IslandNotification
         if (Build.VERSION.SDK_INT >= 36) {
             // Live Update: система сама решает, повысить ли (пользователь может запретить в настройках)
             extras.putBoolean("android.requestPromotedOngoing", true);
+            // styledByProgress выключать нельзя: тогда весь сегмент закрашен и полоска всегда полная
             Notification.ProgressStyle style = new Notification.ProgressStyle().setProgress(progress)
-                .setStyledByProgress(false)
                 .setProgressSegments(java.util.Collections.singletonList(
                     new Notification.ProgressStyle.Segment(1000).setColor(accent)));
             if (cover != null)
