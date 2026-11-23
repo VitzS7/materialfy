@@ -46,6 +46,9 @@ const LOCAL_EXPECT_HOLD: Duration = Duration::from_secs(45);
 const PRELOAD_AFTER_MS: u32 = 3_000;
 /// Опросы без устройства, после которых удалённое устройство считается пропавшим.
 const LOST_AFTER_POLLS: u8 = 2;
+/// Smart Shuffle: /context-resolve с этой линзой отдаёт плейлист вместе с рекомендациями Spotify
+/// (заголовком линза в context-resolve не работает, только параметром).
+const SMART_LENS: &str = "?spotify-apply-lenses=enhance";
 
 pub const MAX_LIST: usize = 500;
 
@@ -195,6 +198,8 @@ pub struct FetchedQueue {
     pub next: Vec<TrackItem>,
     /// играющий контекст с названием, если источник его знает (карточка «Играет из …»)
     pub context: Option<PlayContext>,
+    /// URI рекомендаций Smart Shuffle среди current/next
+    pub recommended: Vec<String>,
 }
 
 impl FetchedQueue {
@@ -203,6 +208,7 @@ impl FetchedQueue {
             current: queue.currently_playing.as_ref().map(map::playable),
             next: queue.queue.iter().map(map::playable).collect(),
             context: None,
+            recommended: Vec::new(),
         }
     }
 }
@@ -338,7 +344,9 @@ pub struct Core {
     pub(crate) local_list: Option<Vec<String>>,
     pub autoplay: bool,
     unavailable_at: Vec<Instant>,
-    last_unavailable_reconnect: Option<Instant>,
+    pub(crate) last_unavailable_reconnect: Option<Instant>,
+    /// ключ не выдан и после переподключения, а играть с тех пор так ничего и не начало
+    key_refused_reconnects: u8,
     /// громкость, которую движок ещё не подтвердил
     pub(crate) pending_local_volume: Option<(u16, Instant)>,
     pub(crate) pending_local_position: Option<(u32, Instant)>,
@@ -368,6 +376,10 @@ pub struct Core {
     assumed_context: Option<AssumedContext>,
     pub(crate) shuffle_wanted: bool,
     pub(crate) shuffle_set_at: Option<Instant>,
+    /// Smart Shuffle выбран (действует вместе с shuffle_wanted, только локально и у плейлистов)
+    pub(crate) smart_wanted: bool,
+    /// рекомендации Smart Shuffle в последней прочитанной очереди
+    recommended: Vec<String>,
     pub(crate) queued_play: Option<PlayRequest>,
     /// вход обещал поднять движок (воспроизведение на ПК разрешено): запуск до подключения ждёт его
     local_expected: Option<Instant>,
@@ -439,6 +451,7 @@ impl Core {
             autoplay: true,
             unavailable_at: Vec::new(),
             last_unavailable_reconnect: None,
+            key_refused_reconnects: 0,
             pending_local_volume: None,
             pending_local_position: None,
             volume: crate::volume_to_u16(volume),
@@ -463,6 +476,8 @@ impl Core {
             assumed_context: None,
             shuffle_wanted: false,
             shuffle_set_at: None,
+            smart_wanted: false,
+            recommended: Vec::new(),
             queued_play: None,
             local_expected: None,
             queue_start_pending: None,
@@ -1034,6 +1049,9 @@ impl Core {
         if state.seek_sequence != self.local.seek_sequence || track_changed {
             self.pending_local_position = None;
         }
+        if state.playback == Playback::Playing && !state.loading && state.error.is_none() {
+            self.key_refused_reconnects = 0;
+        }
         if let Some(error) = &state.error
             && self.local.error.as_deref() != Some(error.as_str())
         {
@@ -1067,7 +1085,16 @@ impl Core {
                     self.unavailable_at.clear();
                     self.last_unavailable_reconnect = Some(now);
                     self.effects.push(Effect::Reconnect);
-                    self.notice(mf_i18n::t("Spotify audio dropped out. Reconnecting playback…"));
+                    if key_refused && self.key_refused_reconnects >= 1 {
+                        // и новая сессия без ключа: так Spotify обходится с аккаунтами, заведёнными с 2024–2025
+                        // (librespot#1649), — переподключение не поможет, говорим как есть
+                        self.notice(mf_i18n::t(KEY_REFUSED_FOR_ACCOUNT));
+                    } else {
+                        self.notice(mf_i18n::t("Spotify audio dropped out. Reconnecting playback…"));
+                    }
+                    if key_refused {
+                        self.key_refused_reconnects = self.key_refused_reconnects.saturating_add(1);
+                    }
                 }
             }
         }
@@ -1250,7 +1277,7 @@ impl Core {
         })));
     }
 
-    fn finish_listening(&mut self, _closing: bool) {
+    pub(crate) fn finish_listening(&mut self, _closing: bool) {
         let Some(mut listening) = self.listening.take() else {
             return;
         };
@@ -1273,6 +1300,13 @@ impl Core {
     /// Учёт прослушивания: только подтверждённое воспроизведение.
     fn note_listening(&mut self) {
         let live = self.now_playing_live();
+        // воспроизведение забрало другое устройство: прослушивание на этом ПК кончилось сейчас,
+        // а не когда там сменится трек (иначе время там засчиталось бы здесь)
+        if self.listening.as_ref().is_some_and(|listening| listening.local) && live.as_ref().is_some_and(|live| !live.local)
+        {
+            self.finish_listening(false);
+            return;
+        }
         let Some(listening) = &mut self.listening else {
             return;
         };
@@ -1789,6 +1823,7 @@ impl Core {
                         self.remember(track);
                     }
                 }
+                self.recommended = std::mem::take(&mut fetched.recommended);
                 let queue = self.adopt_queue(fetched);
                 self.queue = Some(queue);
                 self.reconcile_pending_queue();
@@ -2243,6 +2278,13 @@ impl Core {
                 self.queued_play = None;
                 let mut load = local_load(&request, shuffle);
                 load.repeat = Some(self.local.repeat);
+                if shuffle
+                    && self.smart_wanted
+                    && let Some(uri) = load.context_uri.as_mut()
+                    && smart_capable(uri)
+                {
+                    uri.push_str(SMART_LENS);
+                }
                 self.local_list = load.context_uri.is_none().then(|| load.uris.clone());
                 let shuffle_after = shuffle && load.shuffle.is_none() && !load.uris.is_empty();
                 self.engine(PlayerCommand::Load(load));
@@ -2346,13 +2388,14 @@ impl Core {
         }
     }
 
-    /// «Перемешать»: shuffle on и старт со случайного доступного трека.
-    pub fn shuffle_from(&mut self, items: Vec<TrackItem>, context: PlayContext) {
+    /// «Перемешать»: shuffle on и старт со случайного доступного трека; `smart` — сразу Smart Shuffle (у плейлиста).
+    pub fn shuffle_from(&mut self, items: Vec<TrackItem>, context: PlayContext, smart: bool) {
         let available: Vec<usize> = (0..items.len()).filter(|&i| playable(&items[i])).collect();
         if available.is_empty() {
             self.notice(mf_i18n::t("Nothing to shuffle"));
             return;
         }
+        self.smart_wanted = smart;
         let row = available[fastrand::usize(..available.len())];
         for item in &items {
             self.remember(item);
@@ -2379,7 +2422,8 @@ impl Core {
         };
         let dj = uri == md3_model::context::DJ_URI;
         let shuffle = if dj { Some(false) } else { shuffle };
-        if dj {
+        // лишняя команда устройству (и вызов Web API для чужого) — только если повтор и правда включён
+        if dj && self.repeat() != RepeatMode::Off {
             self.set_repeat(RepeatMode::Off);
         }
         let mut request = PlayRequest::context(uri);
@@ -2695,9 +2739,17 @@ impl Core {
     }
 
     pub fn set_shuffle(&mut self, shuffle: bool) {
+        let was_smart = self.smart_shuffle();
+        if !shuffle {
+            self.smart_wanted = false;
+        }
         self.shuffle_wanted = shuffle;
         self.shuffle_set_at = Some(Instant::now());
         self.session_dirty = true;
+        // рекомендации живут в самом контексте — без них контекст грузится заново
+        if was_smart && !shuffle && self.reload_smart_context() {
+            return;
+        }
         if let Some(assumed) = &mut self.assumed_context {
             assumed.shuffle = Some(shuffle);
         }
@@ -2717,6 +2769,41 @@ impl Core {
                 self.remote(RemoteAction::Shuffle(shuffle), device);
             }
         }
+    }
+
+    /// Smart Shuffle можно включить: играет плейлист на этом ПК (удалённым устройствам линзу не передать).
+    pub fn smart_shuffle_available(&self) -> bool {
+        self.target() == Target::Local && self.playing_context_uri().is_some_and(|uri| smart_capable(&uri))
+    }
+
+    pub fn smart_shuffle(&self) -> bool {
+        self.smart_wanted && self.shuffle_wanted && self.smart_shuffle_available()
+    }
+
+    pub fn set_smart_shuffle(&mut self, smart: bool) {
+        if smart == self.smart_shuffle() || (smart && !self.smart_shuffle_available()) {
+            return;
+        }
+        self.smart_wanted = smart;
+        self.shuffle_wanted = true;
+        self.shuffle_set_at = Some(Instant::now());
+        self.session_dirty = true;
+        self.reload_smart_context();
+    }
+
+    /// Тот же контекст с рекомендациями или без них, с текущего трека и места; если играет рекомендация,
+    /// в обычном плейлисте её нет — тогда с начала.
+    fn reload_smart_context(&mut self) -> bool {
+        let (Some(context), Some(now)) = (self.playing_context_uri(), self.now_playing()) else {
+            return false;
+        };
+        let mut request = PlayRequest::context(context);
+        if !self.recommended.contains(&now.track.uri) {
+            request = request.starting_at_uri(now.track.uri);
+            request.position_ms = now.position_ms;
+        }
+        self.play_request(request, false);
+        true
     }
 
     pub fn repeat(&self) -> RepeatMode {
@@ -3153,14 +3240,17 @@ impl Core {
                     }
                 },
             };
-            rows.push(QueueRow { section: QueueSection::Current, uid, track: now.track.clone() });
+            let recommended = self.recommended.contains(&now.track.uri);
+            rows.push(QueueRow { section: QueueSection::Current, uid, recommended, track: now.track.clone() });
         } else if let Some(item) = &queue_current {
-            rows.push(QueueRow { section: QueueSection::Current, uid: item.uid, track: item.track.clone() });
+            let recommended = self.recommended.contains(&item.track.uri);
+            rows.push(QueueRow { section: QueueSection::Current, uid: item.uid, recommended, track: item.track.clone() });
         }
         if let Some(queue) = &self.queue {
             for (index, item) in queue.next.iter().enumerate() {
                 let section = if index < queued { QueueSection::Manual } else { QueueSection::Context };
-                rows.push(QueueRow { section, uid: item.uid, track: item.track.clone() });
+                let recommended = section == QueueSection::Context && self.recommended.contains(&item.track.uri);
+                rows.push(QueueRow { section, uid: item.uid, recommended, track: item.track.clone() });
             }
         }
         rows
@@ -3231,6 +3321,12 @@ fn playable_list(items: &[TrackItem], row: usize) -> (Vec<String>, usize) {
     (uris, index)
 }
 
+/// Контексты, которые Spotify дополняет рекомендациями (Smart Shuffle). «Любимые треки» с линзой
+/// context-resolve отвечает 404 (проверено 2026-11).
+fn smart_capable(uri: &str) -> bool {
+    uri.starts_with("spotify:playlist:") && !uri.contains('?')
+}
+
 /// Один трек — как контекст (чтобы автоплей шёл от него); список с выбранной строкой не грузится перемешанным.
 pub fn local_load(request: &PlayRequest, shuffle: bool) -> LoadSpec {
     let single_song = request.context_uri.is_none() && request.uris.len() == 1 && request.uris[0].contains(":track:");
@@ -3298,6 +3394,10 @@ fn error_is_no_device(error: Option<&str>) -> bool {
 }
 
 /// Ошибка движка (LocalState.error — непереведённый английский, его сравнивает ядро) → текст интерфейса.
+/// Ключ не выдан и новой сессии.
+pub(crate) const KEY_REFUSED_FOR_ACCOUNT: &str =
+    "Spotify doesn't give this account the keys to play on this computer. Pick another device to play on";
+
 fn engine_error_text(error: &str) -> String {
     use crate::engine::{player, sink};
     if error == sink::NO_DEVICE {

@@ -12,14 +12,16 @@ Item {
 
     signal clicked()
 
-    Accessible.role: Accessible.RadioButton
+    Accessible.role: Accessible.Button
     Accessible.name: text
-    Accessible.checkable: true
-    Accessible.checked: selected
-    Accessible.onPressAction: if (enabled) clicked()
-    activeFocusOnTab: true
-    Keys.onReturnPressed: if (enabled) clicked()
-    Keys.onSpacePressed: if (enabled) clicked()
+    Accessible.selected: selected
+    Accessible.onPressAction: root.activate()
+
+    function activate() {
+        if (!enabled)
+            return
+        clicked()
+    }
 
     implicitHeight: Math.max(32, Theme.type.labelLarge.line + 12)
     // без текста — квадратный чип с одной иконкой
@@ -82,6 +84,6 @@ Item {
         anchors.fill: parent
         radius: root.cornerRadius
         color: root.selected ? Theme.fgSecondaryContainer : Theme.fgSurfaceVariant
-        onClicked: root.clicked()
+        onClicked: root.activate()
     }
 }

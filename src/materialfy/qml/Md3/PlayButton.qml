@@ -14,12 +14,20 @@ Item {
     property bool spin: true
     // выбранный трек ещё грузится: вместо значка — индикатор MD3, кнопка при этом остаётся нажимаемой
     property bool loading: false
+    // см. Icon.renderScale
+    property real renderScale: 1
 
     signal clicked()
 
     Accessible.role: Accessible.Button
-    Accessible.name: loading ? I18n.t("Pause") : playing ? I18n.t("Pause") : I18n.t("Play")
-    Accessible.onPressAction: if (enabled) clicked()
+    Accessible.name: playing || loading ? I18n.t("Pause") : I18n.t("Play")
+    Accessible.onPressAction: root.activate()
+
+    function activate() {
+        if (!enabled)
+            return
+        clicked()
+    }
 
     implicitWidth: size
     implicitHeight: size
@@ -54,6 +62,7 @@ Item {
         visible: !root.loading
         name: root.playing ? "pause" : "play_arrow"
         size: root.size * 0.45
+        renderScale: root.renderScale
         fill: 1
         color: root.enabled ? root.iconColor : Qt.alpha(Theme.fgSurface, Theme.stateLayer.disabledContent)
     }
@@ -71,6 +80,6 @@ Item {
         anchors.fill: parent
         hoverEnabled: !Theme.mobile
         cursorShape: root.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-        onClicked: root.clicked()
+        onClicked: root.activate()
     }
 }

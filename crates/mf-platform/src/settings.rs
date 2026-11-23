@@ -35,6 +35,12 @@ pub enum SettingKey {
     NowPlayingBlur,
     NowPlayingDrift,
     AmbientBackground,
+    /// Canvas трека за плеером
+    Canvas,
+    /// непрозрачность видео Canvas, 0..1
+    CanvasOpacity,
+    /// Canvas и в островке
+    FloatingCanvas,
     CoverSpin,
     CoverPulse,
     CalmWhenInactive,
@@ -124,6 +130,8 @@ pub enum SettingKey {
     Crossfade,
     /// the DJ's spoken lines between its tracks; changes on the fly
     DjVoice,
+    /// сообщать Spotify о прослушиваниях на этом ПК (gabo RawCoreStream), как официальный клиент; по умолчанию выкл.
+    ReportPlays,
     // Spotify Connect и сеть
     /// имя Connect-устройства; "" — «Materialfy · <имя ПК>»
     DeviceName,
@@ -160,6 +168,7 @@ pub enum SettingKey {
     FloatingHideFullscreen,
     FloatingHideMaximized,
     FloatingOffsetX,
+    FloatingScale,
     FloatingEdge,
     FloatingFreeX,
     FloatingFreeY,
@@ -195,7 +204,7 @@ pub enum SettingType {
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 90] = [
+    pub const ALL: [SettingKey; 95] = [
         SettingKey::ThemeMode,
         SettingKey::SchemeVariant,
         SettingKey::AccentFromCover,
@@ -206,6 +215,9 @@ impl SettingKey {
         SettingKey::NowPlayingBlur,
         SettingKey::NowPlayingDrift,
         SettingKey::AmbientBackground,
+        SettingKey::Canvas,
+        SettingKey::CanvasOpacity,
+        SettingKey::FloatingCanvas,
         SettingKey::CoverSpin,
         SettingKey::CoverPulse,
         SettingKey::CalmWhenInactive,
@@ -257,6 +269,7 @@ impl SettingKey {
         SettingKey::PlaybackSpeed,
         SettingKey::Crossfade,
         SettingKey::DjVoice,
+        SettingKey::ReportPlays,
         SettingKey::DeviceName,
         SettingKey::WebClientId,
         SettingKey::ApiLimitTipDismissed,
@@ -277,6 +290,7 @@ impl SettingKey {
         SettingKey::FloatingHideFullscreen,
         SettingKey::FloatingHideMaximized,
         SettingKey::FloatingOffsetX,
+        SettingKey::FloatingScale,
         SettingKey::FloatingEdge,
         SettingKey::FloatingFreeX,
         SettingKey::FloatingFreeY,
@@ -302,6 +316,9 @@ impl SettingKey {
             NowPlayingBlur => "nowPlayingBlur",
             NowPlayingDrift => "nowPlayingDrift",
             AmbientBackground => "ambientBackground",
+            Canvas => "canvas",
+            CanvasOpacity => "canvasOpacity",
+            FloatingCanvas => "floatingCanvas",
             CoverSpin => "coverSpin",
             CoverPulse => "coverPulse",
             CalmWhenInactive => "calmWhenInactive",
@@ -353,6 +370,7 @@ impl SettingKey {
             PlaybackSpeed => "playbackSpeed",
             Crossfade => "crossfade",
             DjVoice => "djVoice",
+            ReportPlays => "reportPlays",
             DeviceName => "deviceName",
             WebClientId => "webClientId",
             ApiLimitTipDismissed => "apiLimitTipDismissed",
@@ -373,6 +391,7 @@ impl SettingKey {
             FloatingHideFullscreen => "floatingHideFullscreen",
             FloatingHideMaximized => "floatingHideMaximized",
             FloatingOffsetX => "floatingOffsetX",
+            FloatingScale => "floatingScale",
             FloatingEdge => "floatingEdge",
             FloatingFreeX => "floatingFreeX",
             FloatingFreeY => "floatingFreeY",
@@ -412,6 +431,9 @@ impl SettingKey {
             NowPlayingBlur => Float(1.0),
             NowPlayingDrift => Float(0.5),
             AmbientBackground => Bool(true),
+            Canvas => Bool(true),
+            CanvasOpacity => Float(0.5),
+            FloatingCanvas => Bool(false),
             CoverSpin => Bool(true),
             CoverPulse => Bool(true),
             CalmWhenInactive => Bool(true),
@@ -463,6 +485,7 @@ impl SettingKey {
             PlaybackSpeed => Float(1.0),
             Crossfade => Int(0),
             DjVoice => Bool(true),
+            ReportPlays => Bool(false),
             DeviceName => Str(String::new()),
             WebClientId => Str(String::new()),
             ApiLimitTipDismissed => Bool(false),
@@ -483,6 +506,7 @@ impl SettingKey {
             FloatingHideFullscreen => Bool(true),
             FloatingHideMaximized => Bool(false),
             FloatingOffsetX => Int(0),
+            FloatingScale => Int(100),
             FloatingEdge => Str("top".into()),
             FloatingFreeX => Int(WINDOW_POS_UNSET),
             FloatingFreeY => Int(WINDOW_POS_UNSET),
@@ -547,6 +571,7 @@ impl SettingKey {
             (SettingKey::LyricsSyncMs, SettingValue::Int(ms)) => {
                 SettingValue::Int(ms.clamp(-500, 500))
             }
+            (SettingKey::FloatingScale, SettingValue::Int(percent)) => SettingValue::Int(percent.clamp(70, 200)),
             (SettingKey::UiScale, SettingValue::Int(percent)) => {
                 // пресеты из настроек; значение из конфига вне пресетов — ближайший
                 let percent = percent.clamp(50, 250);
@@ -1242,7 +1267,7 @@ mod tests {
 
     #[test]
     fn schema() {
-        assert_eq!(SettingKey::ALL.len(), 90);
+        assert_eq!(SettingKey::ALL.len(), 95);
         for key in SettingKey::ALL {
             assert_eq!(SettingKey::from_name(key.name()), Some(key));
             assert_eq!(key.default_value().value_type(), key.value_type());
@@ -1260,6 +1285,9 @@ mod tests {
         assert_eq!(SettingKey::PlaybackSpeed.normalize(Float(f64::NAN)), Float(1.0));
         assert_eq!(SettingKey::Crossfade.normalize(Int(-3)), Int(0));
         assert_eq!(SettingKey::Crossfade.normalize(Int(40)), Int(CROSSFADE_MAX_S));
+        assert_eq!(SettingKey::FloatingScale.normalize(Int(10)), Int(70));
+        assert_eq!(SettingKey::FloatingScale.normalize(Int(130)), Int(130));
+        assert_eq!(SettingKey::FloatingScale.normalize(Int(900)), Int(200));
         assert_eq!(SettingKey::UiScale.normalize(Int(100)), Int(100));
         assert_eq!(SettingKey::UiScale.normalize(Int(110)), Int(100));
         assert_eq!(SettingKey::UiScale.normalize(Int(120)), Int(125));
@@ -1583,7 +1611,7 @@ mod tests {
         let names: Vec<&str> = SettingKey::ALL.iter().map(|k| k.name()).collect();
         for name in [
             "themeMode", "schemeVariant", "accentFromCover", "customSeed", "windowButtons", "trackTransition",
-            "backdropMode", "nowPlayingBlur", "nowPlayingDrift", "ambientBackground", "coverSpin", "coverPulse",
+            "backdropMode", "nowPlayingBlur", "nowPlayingDrift", "ambientBackground", "canvas", "canvasOpacity", "floatingCanvas", "coverSpin", "coverPulse",
             "calmWhenInactive", "lyricsMode", "lyricsFontScale", "lyricsScrim",
             "lyricsTextAlign", "lyricsFillMode", "lyricsVisibleLines", "lyricsHighlight",
             "lyricsActiveScale", "lyricsIdleScale", "lyricsWordBounce", "lyricsDimOpacity",
@@ -1591,11 +1619,11 @@ mod tests {
             "lyricsLineSpacing", "lyricsAnimate", "lyricsShowSource", "lyricsSyncMs",
             "animations", "lowPowerMode", "gpuPreference", "rightPanelOpen", "rightPanelTab", "sidebarCollapsed", "windowWidth",
             "windowHeight", "windowX", "windowY", "windowMaximized", "closeToTray", "wheelStep", "floatingPlayer", "floatingPlayerStyle",
-            "taskbarWidgetPos", "floatingKeyHints", "floatingHideFullscreen", "floatingHideMaximized", "floatingOffsetX", "floatingEdge", "floatingFreeX", "floatingFreeY", "libraryView",
+            "taskbarWidgetPos", "floatingKeyHints", "floatingHideFullscreen", "floatingHideMaximized", "floatingOffsetX", "floatingScale", "floatingEdge", "floatingFreeX", "floatingFreeY", "libraryView",
             "librarySort", "homeHidden", "homeRadioHidden", "sidebarLibrary", "bitrate", "normalisation", "gapless", "autoplay", "volume", "audioDevice",
             "audioCache", "audioCacheMb", "playbackAuthorized", "deviceName", "webClientId", "apiLimitTipDismissed", "proxyMode", "proxyHost",
             "proxyPort", "proxyUsername", "coversBypassProxy", "pins", "hiddenTracks", "radioSeeds", "language", "uiScale", "autoUpdateCheck",
-            "updateChannel", "skippedVersion",
+            "updateChannel", "skippedVersion", "reportPlays",
         ] {
             assert!(names.contains(&name), "{name}");
         }
@@ -1605,6 +1633,7 @@ mod tests {
         assert_eq!(SettingKey::ProxyPort.value_type(), SettingType::Str);
         assert_eq!(SettingKey::AudioCacheMb.value_type(), SettingType::Int);
         assert_eq!(SettingKey::Normalisation.value_type(), SettingType::Bool);
+        assert_eq!(SettingKey::ReportPlays.default_value(), SettingValue::Bool(false));
         assert_eq!(SettingKey::LyricsScrollMs.default_value(), SettingValue::Int(-1));
         assert_eq!(SettingKey::LyricsStaggerMs.default_value(), SettingValue::Int(-1));
         assert_eq!(SettingKey::LyricsIdleScale.default_value(), SettingValue::Float(0.0));

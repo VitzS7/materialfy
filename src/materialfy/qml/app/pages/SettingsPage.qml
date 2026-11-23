@@ -844,6 +844,29 @@ Page {
         }
 
         SettingRow {
+            title: I18n.t("Canvas")
+            description: I18n.t("The track's looping video behind the player, when it has one")
+            Switch { checked: Settings.canvas; onToggled: c => Settings.canvas = c }
+        }
+
+        SettingRow {
+            title: I18n.t("Canvas opacity")
+            enabled: Settings.canvas
+            opacity: enabled ? 1 : 0.5
+            description: I18n.t("Lower it to read lyrics and the queue over the video")
+            Slider {
+                wheelEnabled: false     // колесо прокручивает страницу, а не меняет настройку
+                width: 220
+                from: 0.1
+                to: 1
+                stepSize: 0.05
+                value: Settings.canvasOpacity
+                valueText: v => Math.round(v * 100) + " %"
+                onMoved: v => Settings.canvasOpacity = Math.round(v * 20) / 20
+            }
+        }
+
+        SettingRow {
             title: I18n.t("Blur drift")
             description: Settings.nowPlayingDrift > 0
                 ? I18n.t("Background colors slowly shift while music plays")
@@ -944,6 +967,13 @@ Page {
         }
 
         SettingRow {
+            visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && Settings.canvas
+            title: I18n.t("Canvas in the island")
+            description: I18n.t("Play the track's looping video behind the island")
+            Switch { checked: Settings.floatingCanvas; onToggled: c => Settings.floatingCanvas = c }
+        }
+
+        SettingRow {
             visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && Qt.platform.os !== "osx"
             title: I18n.t("Island edge")
             description: Settings.floatingEdge === "free" ? I18n.t("Drag the island anywhere on the screen")
@@ -955,6 +985,22 @@ Page {
                 size: page.compact ? "xs" : "s"
                 currentIndex: Math.max(0, keys.indexOf(Settings.floatingEdge))
                 onActivated: i => Settings.floatingEdge = keys[i]
+            }
+        }
+
+        SettingRow {
+            visible: floatingPicker.visible && (Settings.floatingPlayer === "island" || Settings.floatingPlayer === "both") && Qt.platform.os !== "osx"
+            title: I18n.t("Island size")
+            description: I18n.t("{0}% of the default size", Settings.floatingScale)
+            Slider {
+                wheelEnabled: false
+                width: 220
+                from: 70
+                to: 200
+                stepSize: 5
+                value: Settings.floatingScale
+                valueText: v => Math.round(v) + " %"
+                onMoved: v => Settings.floatingScale = Math.round(v / 5) * 5
             }
         }
 
@@ -1477,6 +1523,44 @@ Page {
             }
         }
 
+        SettingRow {
+            title: I18n.t("Musixmatch token")
+            description: I18n.t("Musixmatch refuses the built-in anonymous token. Paste your own user token to get word-timed lyrics from it")
+            Row {
+                spacing: 8
+                // сам токен в QML не приходит: он в хранилище секретов ОС
+                TextField {
+                    id: mxmTokenField
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: page.compact ? 180 : 240
+                    placeholderText: Settings.musixmatchTokenSet ? "••••••••" : I18n.t("optional")
+                    echoMode: TextInput.Password
+                    function commit() {
+                        const t = text.trim()
+                        if (t !== "")
+                            Settings.setMusixmatchToken(t)
+                        text = ""
+                    }
+                    onAccepted: commit()
+                    Connections {
+                        target: mxmTokenField.inputItem
+                        function onActiveFocusChanged() {
+                            if (!mxmTokenField.inputItem.activeFocus)
+                                mxmTokenField.commit()
+                        }
+                    }
+                }
+                Button {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: Settings.musixmatchTokenSet
+                    text: I18n.t("Remove")
+                    style: "outlined"
+                    size: "xs"
+                    onClicked: Settings.setMusixmatchToken("")
+                }
+            }
+        }
+
     }
 
     // ================= Воспроизведение =================
@@ -1567,6 +1651,11 @@ Page {
             Switch { checked: MobileShell.islandEnabled; onToggled: c => MobileShell.islandEnabled = c }
         }
 
+        SettingRow {
+            title: I18n.t("Report plays to Spotify")
+            description: I18n.t("Songs played on this computer count in Recently played, your stats and Wrapped, like in the official app. Sends Spotify one event per song. Unofficial: Spotify may ignore it")
+            Switch { checked: Settings.reportPlays; onToggled: c => Settings.reportPlays = c }
+        }
         SettingRow {
             visible: !Theme.mobile
             title: I18n.t("Output device")

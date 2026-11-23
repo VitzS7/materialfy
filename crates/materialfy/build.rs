@@ -113,8 +113,12 @@ END
             // floating.cpp: границы кнопок панели задач — UI Automation (COM, BSTR)
             println!("cargo::rustc-link-lib=oleaut32");
         }
-        // dlsym (display.rs: QWindowSystemInterface::handlePrimaryScreenChanged)
-        Ok("linux") => println!("cargo::rustc-link-lib=dl"),
+        Ok("linux") => {
+            // dlsym (display.rs: QWindowSystemInterface::handlePrimaryScreenChanged)
+            println!("cargo::rustc-link-lib=dl");
+            // floating.cpp: клавиши островка на X11 (XGrabKey)
+            println!("cargo::rustc-link-lib=xcb");
+        }
         // Android: библиотека, которую грузит QtActivity (main ищется через dlsym), — общий объект, а не исполняемый
         Ok("android") => {
             println!("cargo::rustc-link-lib=dl");

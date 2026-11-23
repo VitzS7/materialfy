@@ -23,9 +23,6 @@ Item {
     Accessible.checkable: checkable
     Accessible.checked: checked
     Accessible.onPressAction: root.activate()
-    activeFocusOnTab: true
-    Keys.onReturnPressed: root.activate()
-    Keys.onSpacePressed: root.activate()
 
     function activate() {
         if (!enabled)

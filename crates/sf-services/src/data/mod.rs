@@ -5,6 +5,8 @@
 pub mod album_overview;
 /// исполнитель через GraphQL-шлюз (queryArtistOverview): подписчики, слушатели, похожие, биография
 pub mod artist_overview;
+/// Canvas трека через GraphQL-шлюз (сохранённый запрос canvas)
+pub mod canvas;
 /// коллекция через сессию: «Любимые треки», альбомы, подписки, сохранение и проверка
 pub mod collection_session;
 /// атомарная запись файлов
@@ -35,7 +37,11 @@ pub mod playlist_cache;
 pub mod playlist_session;
 /// подкасты через сессию: шоу, выпуски, сохранённые; места остановки — из GraphQL-шлюза
 pub mod podcast_session;
+/// «Недавнее» по дням: подряд сыгранное из одного контекста — одна строка
+pub mod recents;
 /// маршрутизация Web API / сессии и тексты ошибок
 pub mod route;
+/// статистика прослушиваний из локальной истории: время по периодам и дням, топ треков и исполнителей
+pub mod stats;
 /// подписи, склонения, разница списков
 pub mod text;

@@ -57,6 +57,30 @@ Item {
     readonly property bool animating: revealAnim.running
     readonly property Item coverItem: bigCover
 
+    // ссылка на Canvas текущего трека ("" — нет); спрашиваем, только пока плеер открыт
+    property string canvasUrl: ""
+    function _askCanvas() {
+        canvasUrl = ""
+        if (open && Settings.canvas && Player.trackId !== "" && !Player.isEpisode)
+            Catalog.requestCanvas(Player.trackId)
+    }
+    onOpenChanged: _askCanvas()
+    Connections {
+        target: Settings
+        function onCanvasChanged() { root._askCanvas() }
+    }
+    Connections {
+        target: Player
+        function onTrackChanged() { root._askCanvas() }
+    }
+    Connections {
+        target: Catalog
+        function onCanvasReady(trackId, url) {
+            if (trackId === Player.trackId)
+                root.canvasUrl = url
+        }
+    }
+
     readonly property var _windowShapes: ["cookie9", "cookie12", "cookie7", "flower8", "flower6", "clover4", "sunny", "cookie6"]
     readonly property real _split: 0.45
     // reduced motion: без растущей фигуры — экран сразу во весь размер и проявляется затуханием
@@ -378,10 +402,21 @@ Item {
             followTheme: Settings.accentFromCover
             running: root.visible && Player.playing
         }
+        // Canvas трека, как в телефоне: видео поверх размытой обложки (вуаль над ним — тоньше)
+        Loader {
+            id: canvas
+            anchors.fill: parent
+            active: root.open && root.canvasUrl !== "" && Settings.canvas && !Theme.lowPower && !Theme.reducedMotion
+            source: "CanvasVideo.qml"
+            onLoaded: item.source = Qt.binding(() => root.canvasUrl)
+        }
+        Binding { target: canvas.item; property: "running"; value: Player.playing && !Theme.calm; when: canvas.status === Loader.Ready }
+        Binding { target: canvas.item; property: "strength"; value: Settings.canvasOpacity; when: canvas.status === Loader.Ready }
         Rectangle {
             anchors.fill: parent
             color: Theme.surface
-            opacity: Theme.dark ? 0.62 : 0.55
+            opacity: canvas.item && canvas.item.ready ? (Theme.dark ? 0.35 : 0.3) : (Theme.dark ? 0.62 : 0.55)
+            Behavior on opacity { NumberAnimation { duration: Theme.motion.effectsDefault } }
         }
         }
 
@@ -780,7 +815,17 @@ Item {
                             if (Player.isEpisode)
                                 Player.seekRelative(-10000)
                             else
-                                Player.shuffle = !Player.shuffle
+                                Player.cycleShuffle()
+                        }
+                        // Smart Shuffle — искра вместо кончика стрелки, как у Spotify (подложка цвета кнопки прячет кончик)
+                        Rectangle {
+                            visible: !Player.isEpisode && Player.smartShuffle
+                            width: parent.iconSize * 0.6; height: width; radius: width / 2
+                            color: parent.containerColor
+                            anchors.centerIn: parent
+                            anchors.horizontalCenterOffset: parent.iconSize * 0.42
+                            anchors.verticalCenterOffset: -parent.iconSize * 0.42
+                            Icon { anchors.centerIn: parent; name: "auto_awesome"; size: parent.width * 0.85; fill: 1; color: parent.parent.iconColor }
                         }
                     }
                     TransportButton { icon: "skip_previous"; Accessible.name: I18n.t("Previous track"); iconColor: Theme.fgSurface; onClicked: Player.previous() }

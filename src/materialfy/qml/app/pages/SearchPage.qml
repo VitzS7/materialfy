@@ -12,7 +12,7 @@ Page {
     title: I18n.t("Search")
     showHeader: false
 
-    property string initialQuery
+    property string initialQuery: Catalog.searchQuery
     property int filter: 0
     readonly property var filters: [
         { text: I18n.t("All"), type: "all" }, { text: I18n.t("Tracks"), type: "tracks" }, { text: I18n.t("Albums"), type: "albums" },
@@ -38,7 +38,8 @@ Page {
         return I18n.nCompact(n, "{0} follower", "{0} followers")
     }
     function focusSearch() { field.inputItem.forceActiveFocus() }
-    // запрос уже запущен снаружи (Catalog.openUri("spotify:search:…")): только показать его
+    // Catalog has already started the search before opening the page.
+    property bool _showingQuery: false
     function showQuery(q) {
         if (!q)
             return

@@ -34,6 +34,8 @@ Item {
     property var heroShape: "cookie9"
     property var heroArtistRefs: []            // исполнители-ссылки под названием (альбом)
     property bool showPlayButtons: true
+    // кнопка «Smart Shuffle» рядом с «Перемешать» (плейлисты)
+    property bool smartShuffleButton: false
     readonly property bool scrolled: list.contentY - list.originY > 48
 
     // Правка плейлиста
@@ -450,6 +452,25 @@ Item {
                         size: "s"
                         enabled: page.shownModel !== null && page.shownModel.count > 0
                         onClicked: Player.shuffleFrom(page.shownModel)
+                    }
+                    // телефон: умное перемешивание — тоже круглой кнопкой
+                    IconButton {
+                        visible: page.showPlayButtons && page.smartShuffleButton && !Player.remote && Theme.mobile
+                        Accessible.name: I18n.t("Smart Shuffle")
+                        icon: "auto_awesome"
+                        style: "tonal"
+                        size: "s"
+                        enabled: page.shownModel !== null && page.shownModel.count > 0
+                        onClicked: Player.smartShuffleFrom(page.shownModel)
+                    }
+                    Button {
+                        visible: page.showPlayButtons && page.smartShuffleButton && !Player.remote && !Theme.mobile
+                        text: I18n.t("Smart Shuffle")
+                        icon: "auto_awesome"
+                        style: "tonal"
+                        size: "m"
+                        enabled: page.shownModel !== null && page.shownModel.count > 0
+                        onClicked: Player.smartShuffleFrom(page.shownModel)
                     }
                     Loader {
                         active: page.headerExtra !== null
