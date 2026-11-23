@@ -391,6 +391,11 @@ public class PlaybackService extends Service
         b.addAction(s.playing ? action(android.R.drawable.ic_media_pause, R.string.pause, "pause")
                               : action(android.R.drawable.ic_media_play, R.string.play, "play"));
         b.addAction(action(android.R.drawable.ic_media_next, R.string.next, "next"));
+        // до Android 13 карточка плеера берёт кнопки из уведомления, а не из медиасессии: сердце ставим последним,
+        // чтобы индексы компактного вида (0, 1, 2) остались за «назад / пауза / вперёд»
+        if (s.hasTrack)
+            b.addAction(action(s.liked ? R.drawable.ic_liked : R.drawable.ic_like, s.liked ? R.string.unlike : R.string.like,
+                               "like"));
         Notification.MediaStyle style = new Notification.MediaStyle().setShowActionsInCompactView(0, 1, 2);
         if (session != null)
             style.setMediaSession(session.getSessionToken());
