@@ -34,7 +34,9 @@ final class IslandNotification
     // vivo отверг остров на этой прошивке и версии приложения (см. checkVivoVerdict)
     private static final String KEY_VIVO_REJECTED = "islandVivoRejected";
     // vivo: прогресс острова обновляется не чаще, чем раз в 10 с (так советуют плееры, которые это делают)
-    private static final long MIN_INTERVAL_MS = 10_000L;
+    private static final long SLOW_INTERVAL_MS = 10_000L;
+    // остальные оболочки: полоска идёт раз в секунду, пока экран включён (на выключенном — реже, см. tickMs)
+    private static final long LIVE_INTERVAL_MS = 1_000L;
 
     private String lastKey = "";
     private boolean lastClockRunning;
@@ -45,6 +47,53 @@ final class IslandNotification
         String m = Build.MANUFACTURER.toLowerCase(Locale.ROOT);
         String b = Build.BRAND.toLowerCase(Locale.ROOT);
         return m.contains("vivo") || b.contains("vivo") || b.contains("iqoo");
+    }
+
+    // как часто обновлять полоску: до этого она отставала на целых 10 с от настоящей позиции
+    static long tickMs(Context context)
+    {
+        if (isVivo())
+            return SLOW_INTERVAL_MS;
+        android.os.PowerManager pm = (android.os.PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        return pm != null && pm.isInteractive() ? LIVE_INTERVAL_MS : SLOW_INTERVAL_MS;
+    }
+
+    // Цвет карточки по обложке: средний по насыщенным пикселям (как акцент плеера на ПК)
+    private static Bitmap accentOf;
+    private static int accentValue;
+
+    static synchronized int accent(Bitmap cover, int fallback)
+    {
+        if (cover == null)
+            return fallback;
+        // тик раз в секунду: на ту же обложку цвет не пересчитываем
+        if (cover == accentOf)
+            return accentValue;
+        Bitmap small = Bitmap.createScaledBitmap(cover, 16, 16, true);
+        float[] hsv = new float[3];
+        double r = 0, g = 0, b = 0, weight = 0;
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                int c = small.getPixel(x, y);
+                android.graphics.Color.colorToHSV(c, hsv);
+                // серые и очень тёмные/светлые пиксели не дают цвета
+                double w = hsv[1] * Math.min(hsv[2], 1f - 0.5f * Math.max(0f, hsv[2] - 0.8f)) + 0.01;
+                r += android.graphics.Color.red(c) * w;
+                g += android.graphics.Color.green(c) * w;
+                b += android.graphics.Color.blue(c) * w;
+                weight += w;
+            }
+        }
+        if (small != cover)
+            small.recycle();
+        android.graphics.Color.colorToHSV(android.graphics.Color.rgb((int) (r / weight), (int) (g / weight),
+                                                                     (int) (b / weight)), hsv);
+        // яркость в середину, чтобы белый текст и кнопки читались на любой обложке
+        hsv[1] = Math.max(hsv[1], 0.35f);
+        hsv[2] = Math.max(0.35f, Math.min(hsv[2], 0.55f));
+        accentOf = cover;
+        accentValue = android.graphics.Color.HSVToColor(hsv);
+        return accentValue;
     }
 
     // Есть куда показать: Live Updates (Android 16) или остров vivo
@@ -64,7 +113,7 @@ final class IslandNotification
     }
 
     void update(Context context, PlaybackService.State s, Bitmap cover, PendingIntent open,
-                Notification.Action playPause, Notification.Action next)
+                Notification.Action previous, Notification.Action playPause, Notification.Action next)
     {
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (!supported() || !enabled(context) || !s.hasTrack || !s.playing || vivoRejected(context)) {
@@ -73,8 +122,8 @@ final class IslandNotification
         }
         String key = s.title + "\u0000" + s.artist;
         long now = SystemClock.elapsedRealtime();
-        // тот же трек — не чаще раза в 10 с (позицию между обновлениями ведёт таймер чипа)
-        if (key.equals(lastKey) && s.clockRunning == lastClockRunning && now - lastAt < MIN_INTERVAL_MS)
+        // тот же трек — не чаще интервала (между обновлениями время ведёт таймер чипа)
+        if (key.equals(lastKey) && s.clockRunning == lastClockRunning && now - lastAt < tickMs(context) - 50)
             return;
         boolean newTrack = !key.equals(lastKey);
         lastKey = key;
@@ -83,22 +132,29 @@ final class IslandNotification
 
         ensureChannel(context, nm);
         int progress = s.durationMs > 0 ? (int) Math.max(0, Math.min(1000, s.positionMs * 1000 / s.durationMs)) : 0;
+        int accent = accent(cover, 0xFF3A3A5C);
+        long remaining = s.durationMs > 0 ? Math.max(0, s.durationMs - s.positionMs) : 0;
         Notification.Builder b = new Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(s.title)
             .setContentText(s.artist)
+            .setSubText(s.album)
+            .setColor(accent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setLocalOnly(true)
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setContentIntent(open)
-            // время в чипе острова идёт само: с начала трека
-            .setWhen(System.currentTimeMillis() - Math.max(0, s.positionMs))
+            // время в чипе острова идёт само и показывает, сколько осталось до конца трека
+            .setWhen(System.currentTimeMillis() + (s.durationMs > 0 ? remaining : -Math.max(0, s.positionMs)))
             .setShowWhen(s.clockRunning)
-            .setUsesChronometer(s.clockRunning);
+            .setUsesChronometer(s.clockRunning)
+            .setChronometerCountDown(s.durationMs > 0);
         if (cover != null)
             b.setLargeIcon(cover);
+        if (previous != null)
+            b.addAction(previous);
         if (playPause != null)
             b.addAction(playPause);
         if (next != null)
@@ -108,10 +164,16 @@ final class IslandNotification
         if (Build.VERSION.SDK_INT >= 36) {
             // Live Update: система сама решает, повысить ли (пользователь может запретить в настройках)
             extras.putBoolean("android.requestPromotedOngoing", true);
-            b.setStyle(new Notification.ProgressStyle().setProgress(progress).setStyledByProgress(false)
-                           .setProgressSegments(java.util.Collections.singletonList(
-                               new Notification.ProgressStyle.Segment(1000))));
-            b.setShortCriticalText(shortTitle(s.title));
+            Notification.ProgressStyle style = new Notification.ProgressStyle().setProgress(progress)
+                .setStyledByProgress(false)
+                .setProgressSegments(java.util.Collections.singletonList(
+                    new Notification.ProgressStyle.Segment(1000).setColor(accent)));
+            if (cover != null)
+                style.setProgressTrackerIcon(Icon.createWithBitmap(cover));
+            b.setStyle(style);
+            // пока идёт время, чип показывает таймер до конца; название — только когда таймера нет
+            if (!s.clockRunning)
+                b.setShortCriticalText(shortTitle(s.title));
         }
         if (isVivo()) {
             extras.putInt("notification.superx.operation", newTrack ? 0 : 1);

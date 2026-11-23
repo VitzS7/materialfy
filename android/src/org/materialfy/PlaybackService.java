@@ -86,14 +86,14 @@ public class PlaybackService extends Service
 
     private final ExecutorService loader = Executors.newSingleThreadExecutor();
     private final IslandNotification island = new IslandNotification();
-    // прогресс в острове системы — раз в 10 с, пока играет
+    // прогресс в острове системы: раз в секунду на включённом экране, иначе раз в 10 с (см. IslandNotification.tickMs)
     private final Runnable islandTick = new Runnable() {
         @Override
         public void run()
         {
             updateIsland();
             if (latest.playing && latest.hasTrack)
-                MAIN.postDelayed(this, 10_000L);
+                MAIN.postDelayed(this, IslandNotification.tickMs(PlaybackService.this));
         }
     };
     private String coverUrl = "";
@@ -310,7 +310,7 @@ public class PlaybackService extends Service
         session.setPlaybackState(state
                                      .setActions(actions)
                                      .setState(s.playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
-                                               s.positionMs, s.clockRunning ? 1f : 0f, SystemClock.elapsedRealtime())
+                                               s.positionNow(), s.clockRunning ? 1f : 0f, SystemClock.elapsedRealtime())
                                      .build());
 
         if (s.playing && s.local) {
@@ -324,8 +324,9 @@ public class PlaybackService extends Service
 
         MAIN.removeCallbacks(islandTick);
         updateIsland();
-        if (s.playing)
-            MAIN.postDelayed(islandTick, 10_000L);
+        // без острова таймер не нужен: секундный тик зря будил бы главный поток
+        if (s.playing && IslandNotification.supported() && IslandNotification.enabled(this))
+            MAIN.postDelayed(islandTick, IslandNotification.tickMs(this));
 
         Notification notification = buildNotification();
         if (s.playing) {
@@ -350,7 +351,8 @@ public class PlaybackService extends Service
         now.clockRunning = s.clockRunning;
         now.hasTrack = s.hasTrack;
         PendingIntent open = session != null ? session.getController().getSessionActivity() : null;
-        island.update(this, now, cover, open, action(android.R.drawable.ic_media_pause, R.string.pause, "pause"),
+        island.update(this, now, cover, open, s.canPrevious ? action(android.R.drawable.ic_media_previous, R.string.previous, "previous") : null,
+                      action(android.R.drawable.ic_media_pause, R.string.pause, "pause"),
                       s.canNext ? action(android.R.drawable.ic_media_next, R.string.next, "next") : null);
     }
 
@@ -370,8 +372,11 @@ public class PlaybackService extends Service
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setOngoing(s.playing)
             .setContentIntent(session != null ? session.getController().getSessionActivity() : null);
-        if (cover != null)
+        if (cover != null) {
             b.setLargeIcon(cover);
+            // карточка в цвет обложки, как плавающий остров на ПК
+            b.setColor(IslandNotification.accent(cover, 0xFF3A3A5C)).setColorized(true);
+        }
         b.addAction(action(android.R.drawable.ic_media_previous, R.string.previous, "previous"));
         b.addAction(s.playing ? action(android.R.drawable.ic_media_pause, R.string.pause, "pause")
                               : action(android.R.drawable.ic_media_play, R.string.play, "play"));
