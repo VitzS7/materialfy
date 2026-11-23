@@ -115,7 +115,7 @@ final class IslandNotification
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, on).apply();
     }
 
-    void update(Context context, PlaybackService.State s, Bitmap cover, PendingIntent open,
+    void update(Context context, PlaybackService.State s, Bitmap cover, Bitmap tracker, PendingIntent open,
                 Notification.Action previous, Notification.Action playPause, Notification.Action next)
     {
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
@@ -176,8 +176,8 @@ final class IslandNotification
             Notification.ProgressStyle style = new Notification.ProgressStyle().setProgress(progress)
                 .setProgressSegments(java.util.Collections.singletonList(
                     new Notification.ProgressStyle.Segment(1000).setColor(accent)));
-            if (cover != null)
-                style.setProgressTrackerIcon(Icon.createWithBitmap(cover));
+            if (tracker != null)
+                style.setProgressTrackerIcon(Icon.createWithBitmap(tracker));
             b.setStyle(style);
             // пока идёт время, чип показывает таймер до конца; название — только когда таймера нет
             if (!s.clockRunning)

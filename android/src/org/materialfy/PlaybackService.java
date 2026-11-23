@@ -15,6 +15,10 @@ import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.BitmapShader;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Shader;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -98,6 +102,10 @@ public class PlaybackService extends Service
     };
     private String coverUrl = "";
     private Bitmap cover;
+    // уменьшенные копии для уведомлений: остров обновляется раз в секунду, и полная обложка (640 px, 1,6 МБ)
+    // каждый раз шла бы через Binder дважды (значок и ползунок полоски)
+    private Bitmap thumb;
+    private Bitmap tracker;
 
     private final BroadcastReceiver noisy = new BroadcastReceiver() {
         @Override
@@ -285,6 +293,8 @@ public class PlaybackService extends Service
         if (!s.coverUrl.equals(coverUrl)) {
             coverUrl = s.coverUrl;
             cover = null;
+            thumb = null;
+            tracker = null;
             loadCover(coverUrl);
         }
         MediaMetadata.Builder meta = new MediaMetadata.Builder()
@@ -351,7 +361,7 @@ public class PlaybackService extends Service
         now.clockRunning = s.clockRunning;
         now.hasTrack = s.hasTrack;
         PendingIntent open = session != null ? session.getController().getSessionActivity() : null;
-        island.update(this, now, cover, open, s.canPrevious ? action(android.R.drawable.ic_media_previous, R.string.previous, "previous") : null,
+        island.update(this, now, thumb, tracker, open, s.canPrevious ? action(android.R.drawable.ic_media_previous, R.string.previous, "previous") : null,
                       action(android.R.drawable.ic_media_pause, R.string.pause, "pause"),
                       s.canNext ? action(android.R.drawable.ic_media_next, R.string.next, "next") : null);
     }
@@ -372,10 +382,10 @@ public class PlaybackService extends Service
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setOngoing(s.playing)
             .setContentIntent(session != null ? session.getController().getSessionActivity() : null);
-        if (cover != null) {
-            b.setLargeIcon(cover);
+        if (thumb != null) {
+            b.setLargeIcon(thumb);
             // карточка в цвет обложки, как плавающий остров на ПК
-            b.setColor(IslandNotification.accent(cover, 0xFF3A3A5C)).setColorized(true);
+            b.setColor(IslandNotification.accent(thumb, 0xFF3A3A5C)).setColorized(true);
         }
         b.addAction(action(android.R.drawable.ic_media_previous, R.string.previous, "previous"));
         b.addAction(s.playing ? action(android.R.drawable.ic_media_pause, R.string.pause, "pause")
@@ -510,13 +520,39 @@ public class PlaybackService extends Service
             } catch (Exception e) {
                 bitmap = null;
             }
-            final Bitmap result = bitmap;
+            if (bitmap == null)
+                return;
+            final Bitmap full = scaled(bitmap, 640);
+            final Bitmap small = scaled(full, 256);
+            final Bitmap round = circle(small, 96);
             MAIN.post(() -> {
-                if (!url.equals(coverUrl) || result == null)
+                if (!url.equals(coverUrl))
                     return;
-                cover = result;
+                cover = full;
+                thumb = small;
+                tracker = round;
                 apply();
             });
         });
+    }
+
+    private static Bitmap scaled(Bitmap src, int max)
+    {
+        int w = src.getWidth(), h = src.getHeight();
+        if (w <= max && h <= max)
+            return src;
+        float k = (float) max / Math.max(w, h);
+        return Bitmap.createScaledBitmap(src, Math.max(1, Math.round(w * k)), Math.max(1, Math.round(h * k)), true);
+    }
+
+    // круглая обложка для ползунка полоски острова: квадратная картинка на тонкой полоске выглядит обрезанной
+    private static Bitmap circle(Bitmap src, int size)
+    {
+        Bitmap square = Bitmap.createScaledBitmap(src, size, size, true);
+        Bitmap out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        paint.setShader(new BitmapShader(square, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP));
+        new Canvas(out).drawCircle(size / 2f, size / 2f, size / 2f, paint);
+        return out;
     }
 }
