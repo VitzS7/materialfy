@@ -36,6 +36,7 @@ def prepare_core(directory):
         "Settings": 'property string animations: "reduced"; property string lowPowerMode: "auto"',
         "Translations": 'property string language: "en"; property var ru: ({}); property var pt: ({})',
         "Auth": 'property string state: "signedIn"',
+        "MobileShell": 'function prepareAccessibility(input, owner) {}',
         "IconMetrics": 'function glyph(name) { return "" } function ink(name, size) { return Qt.rect(0, 0, size, size) }',
         "Catalog": """
             property string searchQuery: "Last catalog search"
