@@ -16,6 +16,8 @@
     <!-- SignInService до Android 14: процесс не замораживается, пока вход идёт в браузере -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- без оптимизации батареи музыка не обрывается в фоне; пользователь подтверждает в системном окне -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Android 16: плеер как Live Update (чип статус-бара, Now Bar, Super Island и т. п.) -->
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />

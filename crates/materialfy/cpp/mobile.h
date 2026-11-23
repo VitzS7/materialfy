@@ -5,6 +5,7 @@
 
 #include <QtCore/QObject>
 #include <QtCore/QString>
+#include <QtCore/QStringList>
 
 #include <cstddef>
 #include <cstdint>
@@ -55,6 +56,10 @@ public:
   Q_INVOKABLE void setSystemBars(bool lightBars);
   // «Назад» на корне: свернуть приложение (музыка играет дальше), а не выходить
   Q_INVOKABLE void moveTaskToBack();
+  // Что мешает музыке играть в фоне: "battery", "notifications", "promoted", "autostart" (пусто — всё в порядке)
+  Q_INVOKABLE QStringList backgroundIssues() const;
+  // Открыть системный экран для пункта из backgroundIssues
+  Q_INVOKABLE void openBackgroundSetting(const QString& what);
   // Короткий тактильный отклик (долгое нажатие, переключатели)
   Q_INVOKABLE void haptic();
   // Конец журнала приложения (MATERIALFY_LOG_FILE) — в системное окно «Поделиться» (Telegram, почта, буфер)

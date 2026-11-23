@@ -184,6 +184,37 @@ MobileShell::islandEnabled() const
 #endif
 }
 
+QStringList
+MobileShell::backgroundIssues() const
+{
+#if defined(Q_OS_ANDROID)
+  const QJniObject result = QJniObject::callStaticObjectMethod(
+    BRIDGE, "backgroundIssues", "(Landroid/content/Context;)Ljava/lang/String;", context_object().object());
+  QJniEnvironment env;
+  env.checkAndClearExceptions();
+  const QString text = result.isValid() ? result.toString() : QString();
+  return text.isEmpty() ? QStringList() : text.split(QLatin1Char(','));
+#else
+  return {};
+#endif
+}
+
+void
+MobileShell::openBackgroundSetting(const QString& what)
+{
+#if defined(Q_OS_ANDROID)
+  QJniObject::callStaticMethod<void>(BRIDGE,
+                                     "openBackgroundSetting",
+                                     "(Landroid/content/Context;Ljava/lang/String;)V",
+                                     context_object().object(),
+                                     jstr(what).object<jstring>());
+  QJniEnvironment env;
+  env.checkAndClearExceptions();
+#else
+  Q_UNUSED(what)
+#endif
+}
+
 void
 MobileShell::setIslandEnabled(bool on)
 {

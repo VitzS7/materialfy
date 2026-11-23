@@ -417,6 +417,7 @@ Window {
         Radio.select(seedUri)
         Radio.playStation(seedUri, title)
     }
+    function openBackgroundSetup() { backgroundSetup.open() }
     function openSettings(section) {
         if (nowPlaying.open)
             nowPlaying.hide()
@@ -494,6 +495,10 @@ Window {
     }
     ApiLimitDialog {
         z: 2120
+    }
+    BackgroundSetupDialog {
+        id: backgroundSetup
+        z: 2130
     }
     // Обновление (Настройки → Обновления; новая версия — снекбаром с «Подробнее»)
     UpdateSheet {

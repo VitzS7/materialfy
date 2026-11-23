@@ -133,6 +133,97 @@ public final class MobileBridge
         PlaybackService.refreshIsland();
     }
 
+    // Что мешает музыке играть в фоне (через запятую): "battery" — оптимизация батареи, "notifications" — уведомления
+    // выключены, "promoted" — Live Update (остров) запрещён, "autostart" — у оболочки есть свой список автозапуска
+    // (его состояние прочитать нельзя, поэтому пункт показывается всегда, пока пользователь его не отметил)
+    public static String backgroundIssues(Context context)
+    {
+        java.util.List<String> issues = new java.util.ArrayList<>();
+        android.os.PowerManager pm = (android.os.PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        if (pm != null && !pm.isIgnoringBatteryOptimizations(context.getPackageName()))
+            issues.add("battery");
+        android.app.NotificationManager nm =
+            (android.app.NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm != null && !nm.areNotificationsEnabled())
+            issues.add("notifications");
+        if (nm != null && android.os.Build.VERSION.SDK_INT >= 36 && IslandNotification.enabled(context)
+            && !nm.canPostPromotedNotifications())
+            issues.add("promoted");
+        if (autostartIntents().length > 0)
+            issues.add("autostart");
+        return String.join(",", issues);
+    }
+
+    // Экраны автозапуска оболочек, которые убивают фоновые приложения сверх оптимизации батареи
+    private static Intent[] autostartIntents()
+    {
+        String maker = (android.os.Build.MANUFACTURER + " " + android.os.Build.BRAND).toLowerCase(java.util.Locale.ROOT);
+        if (maker.contains("xiaomi") || maker.contains("redmi") || maker.contains("poco"))
+            return new Intent[] { new Intent().setClassName("com.miui.securitycenter",
+                                                            "com.miui.permcenter.autostart.AutoStartManagementActivity") };
+        if (maker.contains("oppo") || maker.contains("realme") || maker.contains("oneplus"))
+            return new Intent[] {
+                new Intent().setClassName("com.coloros.safecenter",
+                                          "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
+                new Intent().setClassName("com.oplus.battery", "com.oplus.powermanager.fuelgaue.PowerUsageModelActivity"),
+                new Intent().setClassName("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity")
+            };
+        if (maker.contains("vivo") || maker.contains("iqoo"))
+            return new Intent[] {
+                new Intent().setClassName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"),
+                new Intent().setClassName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity")
+            };
+        if (maker.contains("huawei") || maker.contains("honor"))
+            return new Intent[] { new Intent().setClassName("com.huawei.systemmanager",
+                                                            "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity") };
+        return new Intent[0];
+    }
+
+    public static void openBackgroundSetting(Context context, String what)
+    {
+        String pkg = context.getPackageName();
+        Intent main = null;
+        switch (what) {
+        case "battery":
+            main = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                              android.net.Uri.parse("package:" + pkg));
+            break;
+        case "notifications":
+            main = new Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                       .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, pkg);
+            break;
+        case "promoted":
+            if (android.os.Build.VERSION.SDK_INT >= 36)
+                main = new Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS)
+                           .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, pkg);
+            break;
+        case "autostart":
+            for (Intent intent : autostartIntents()) {
+                if (start(context, intent))
+                    return;
+            }
+            break;
+        default:
+            break;
+        }
+        if (main != null && start(context, main))
+            return;
+        // запасной путь: страница приложения в настройках, оттуда доступны батарея и уведомления
+        start(context, new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                  android.net.Uri.parse("package:" + pkg)));
+    }
+
+    private static boolean start(Context context, Intent intent)
+    {
+        try {
+            context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            return true;
+        } catch (RuntimeException e) {
+            // экрана нет в этой прошивке или он закрыт для сторонних приложений
+            return false;
+        }
+    }
+
     // Вход в Spotify ждёт ответа браузера (см. SignInService)
     public static void setBrowserWait(Context context, boolean waiting)
     {

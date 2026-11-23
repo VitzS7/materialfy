@@ -1643,6 +1643,18 @@ Page {
             description: I18n.t("Spotify’s DJ talks between the songs it plays. Off: just the music")
             Switch { checked: Settings.djVoice; onToggled: c => Settings.djVoice = c }
         }
+        // Android: что разрешить, чтобы музыка играла в фоне (батарея, уведомления, автозапуск)
+        SettingRow {
+            visible: MobileShell.android
+            title: I18n.t("Keep the music playing")
+            description: I18n.t("Battery optimization, notifications and autostart, so Android does not close Materialfy in the background")
+            Button {
+                text: I18n.t("Check")
+                style: "tonal"
+                size: "s"
+                onClicked: Window.window?.openBackgroundSetup()
+            }
+        }
         // Android: плеер в «острове» системы (Live Updates Android 16, атомный остров vivo)
         SettingRow {
             visible: MobileShell.islandSupported

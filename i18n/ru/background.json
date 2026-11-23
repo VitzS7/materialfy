@@ -1,0 +1,16 @@
+{
+  "Keep the music playing": "Чтобы музыка не прерывалась",
+  "A few settings stop Android from closing Materialfy in the background:": "Несколько настроек не дают Android закрыть Materialfy в фоне:",
+  "Everything is set. Materialfy can keep playing in the background.": "Всё настроено. Materialfy может играть в фоне.",
+  "Allow background activity": "Разрешить работу в фоне",
+  "Turn off battery optimization for Materialfy, or Android stops the music when the screen is off. On Xiaomi pick “No restrictions” in the battery saver.": "Отключите оптимизацию батареи для Materialfy, иначе Android остановит музыку при выключенном экране. На Xiaomi выберите «Без ограничений» в экономии заряда.",
+  "Turn on notifications": "Включить уведомления",
+  "The player card on the lock screen and in the shade needs notifications.": "Карточке плеера на экране блокировки и в шторке нужны уведомления.",
+  "Allow live notifications": "Разрешить живые уведомления",
+  "Shows the track and its progress in the status bar chip and the system island.": "Показывает трек и прогресс в чипе строки состояния и в острове системы.",
+  "Allow autostart": "Разрешить автозапуск",
+  "Your phone also keeps a list of apps allowed to run in the background. Turn Materialfy on there.": "В телефоне есть и свой список приложений, которым можно работать в фоне. Включите там Materialfy.",
+  "Open settings": "Открыть настройки",
+  "Check": "Проверить",
+  "Battery optimization, notifications and autostart, so Android does not close Materialfy in the background": "Оптимизация батареи, уведомления и автозапуск, чтобы Android не закрывал Materialfy в фоне"
+}
