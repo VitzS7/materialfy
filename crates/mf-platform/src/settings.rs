@@ -928,6 +928,11 @@ impl Backend for IniBackend {
 
     fn write(&self, name: &str, value: &SettingValue) -> std::io::Result<()> {
         let mut doc = self.doc.lock().unwrap_or_else(|e| e.into_inner());
+        // В этот же файл пишет и QSettings оболочки (QtCore.Settings в QML): без перечитывания запись отсюда
+        // затирала ключи, которые он добавил после запуска
+        if let Ok(bytes) = std::fs::read(&self.path) {
+            *doc = ini::Document::parse(&String::from_utf8_lossy(&bytes));
+        }
         let encoded = match value {
             SettingValue::Str(s) => ini::encode_string(&escape_at(s)),
             other => other.to_qt_string(),
@@ -1685,6 +1690,22 @@ mod tests {
         let store = SettingsStore::with_backend(Box::new(IniBackend::open(path.clone())));
         assert!(store.set(SettingKey::WindowHeight, SettingValue::Int(900)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[General]\nwindowHeight=900\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn ini_keeps_keys_another_writer_added_after_opening() {
+        let path = temp_ini("shared");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let store = SettingsStore::with_backend(Box::new(IniBackend::open(path.clone())));
+        assert!(store.set(SettingKey::WindowHeight, SettingValue::Int(900)));
+        // QSettings оболочки (QtCore.Settings в QML) пишет в тот же файл, пока приложение работает
+        let text = std::fs::read_to_string(&path).unwrap() + "\n[Background]\ndismissed=true\n";
+        std::fs::write(&path, text).unwrap();
+        assert!(store.set(SettingKey::WindowWidth, SettingValue::Int(1000)));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[Background]\ndismissed=true\n"), "{text}");
+        assert!(text.contains("windowHeight=900\n") && text.contains("windowWidth=1000\n"), "{text}");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 }
