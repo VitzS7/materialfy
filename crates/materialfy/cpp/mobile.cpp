@@ -184,6 +184,42 @@ MobileShell::islandEnabled() const
 #endif
 }
 
+bool
+MobileShell::mediaOption(const QString& key) const
+{
+#if defined(Q_OS_ANDROID)
+  const bool on = QJniObject::callStaticMethod<jboolean>(BRIDGE,
+                                                         "mediaOption",
+                                                         "(Landroid/content/Context;Ljava/lang/String;)Z",
+                                                         context_object().object(),
+                                                         jstr(key).object<jstring>());
+  QJniEnvironment env;
+  env.checkAndClearExceptions();
+  return on;
+#else
+  Q_UNUSED(key)
+  return true;
+#endif
+}
+
+void
+MobileShell::setMediaOption(const QString& key, bool on)
+{
+  if (on == mediaOption(key))
+    return;
+#if defined(Q_OS_ANDROID)
+  QJniObject::callStaticMethod<void>(BRIDGE,
+                                     "setMediaOption",
+                                     "(Landroid/content/Context;Ljava/lang/String;Z)V",
+                                     context_object().object(),
+                                     jstr(key).object<jstring>(),
+                                     static_cast<jboolean>(on));
+  QJniEnvironment env;
+  env.checkAndClearExceptions();
+  emit mediaOptionsChanged();
+#endif
+}
+
 QStringList
 MobileShell::backgroundIssues() const
 {

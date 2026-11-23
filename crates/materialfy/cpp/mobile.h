@@ -21,6 +21,9 @@ class MobileShell : public QObject
   // Плеер в «острове» системы (Live Updates Android 16, остров vivo): есть ли где показать и включён ли
   Q_PROPERTY(bool islandSupported READ islandSupported CONSTANT)
   Q_PROPERTY(bool islandEnabled READ islandEnabled WRITE setIslandEnabled NOTIFY islandEnabledChanged)
+  // Уведомление плеера (Android): в цвет обложки и сердце «в любимые» в карточке плеера системы
+  Q_PROPERTY(bool mediaColorized READ mediaColorized WRITE setMediaColorized NOTIFY mediaOptionsChanged)
+  Q_PROPERTY(bool mediaLikeButton READ mediaLikeButton WRITE setMediaLikeButton NOTIFY mediaOptionsChanged)
 
 public:
   explicit MobileShell(QObject* parent = nullptr);
@@ -33,6 +36,10 @@ public:
   bool islandSupported() const;
   bool islandEnabled() const;
   void setIslandEnabled(bool on);
+  bool mediaColorized() const { return mediaOption(QStringLiteral("mediaColorized")); }
+  void setMediaColorized(bool on) { setMediaOption(QStringLiteral("mediaColorized"), on); }
+  bool mediaLikeButton() const { return mediaOption(QStringLiteral("mediaLikeButton")); }
+  void setMediaLikeButton(bool on) { setMediaOption(QStringLiteral("mediaLikeButton"), on); }
 
   // Состояние плеера → MediaSession и уведомление (Android). hasTrack=false — убрать уведомление;
   // local=false — играет другое устройство (Connect): без аудиофокуса и блокировок сна.
@@ -68,11 +75,15 @@ public:
 signals:
   void fontScaleChanged();
   void islandEnabledChanged();
+  void mediaOptionsChanged();
   // Команды из уведомления, гарнитуры и экрана блокировки: "play", "pause", "toggle", "next", "previous",
   // "seek" (arg — мс), "stop"
   void mediaCommand(const QString& command, qint64 arg);
 
 private:
+  bool mediaOption(const QString& key) const;
+  void setMediaOption(const QString& key, bool on);
+
   bool m_lightBars = false;
   bool m_browserWait = false;
   bool m_lightBarsSet = false;

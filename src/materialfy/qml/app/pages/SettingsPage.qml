@@ -1662,6 +1662,19 @@ Page {
             description: I18n.t("Track and progress in the status bar chip, Now Bar, Super Island, Origin Island and similar")
             Switch { checked: MobileShell.islandEnabled; onToggled: c => MobileShell.islandEnabled = c }
         }
+        // Android: вид уведомления плеера (хранится на стороне Java, как и остров)
+        SettingRow {
+            visible: MobileShell.android
+            title: I18n.t("Notification in the cover color")
+            description: I18n.t("The player notification and the island progress bar take their color from the album cover")
+            Switch { checked: MobileShell.mediaColorized; onToggled: c => MobileShell.mediaColorized = c }
+        }
+        SettingRow {
+            visible: MobileShell.android
+            title: I18n.t("Like button in the notification")
+            description: I18n.t("A heart next to the player buttons on the lock screen and in the notification shade")
+            Switch { checked: MobileShell.mediaLikeButton; onToggled: c => MobileShell.mediaLikeButton = c }
+        }
 
         SettingRow {
             title: I18n.t("Report plays to Spotify")

@@ -157,12 +157,12 @@ public class PlaybackService extends Service
         });
     }
 
-    // Настройки → «Плеер в острове системы»: применить сразу
-    static void refreshIsland()
+    // Настройки уведомления и острова: применить сразу (apply заново ставит и таймер острова)
+    static void refresh()
     {
         MAIN.post(() -> {
             if (running != null)
-                running.updateIsland();
+                running.apply();
         });
     }
 
@@ -313,7 +313,7 @@ public class PlaybackService extends Service
         if (s.canPrevious)
             actions |= PlaybackState.ACTION_SKIP_TO_PREVIOUS;
         PlaybackState.Builder state = new PlaybackState.Builder();
-        if (s.hasTrack)
+        if (s.hasTrack && IslandNotification.option(this, IslandNotification.KEY_LIKE))
             state.addCustomAction(new PlaybackState.CustomAction.Builder(
                                       PlayerSession.ACTION_LIKE, getString(s.liked ? R.string.unlike : R.string.like),
                                       s.liked ? R.drawable.ic_liked : R.drawable.ic_like).build());
@@ -384,8 +384,9 @@ public class PlaybackService extends Service
             .setContentIntent(session != null ? session.getController().getSessionActivity() : null);
         if (thumb != null) {
             b.setLargeIcon(thumb);
-            // карточка в цвет обложки, как плавающий остров на ПК
-            b.setColor(IslandNotification.accent(thumb, 0xFF3A3A5C)).setColorized(true);
+            // карточка в цвет обложки, как плавающий остров на ПК (можно выключить в настройках)
+            b.setColor(IslandNotification.accent(thumb, 0xFF3A3A5C))
+                .setColorized(IslandNotification.option(this, IslandNotification.KEY_COLORIZE));
         }
         b.addAction(action(android.R.drawable.ic_media_previous, R.string.previous, "previous"));
         b.addAction(s.playing ? action(android.R.drawable.ic_media_pause, R.string.pause, "pause")
@@ -393,7 +394,7 @@ public class PlaybackService extends Service
         b.addAction(action(android.R.drawable.ic_media_next, R.string.next, "next"));
         // до Android 13 карточка плеера берёт кнопки из уведомления, а не из медиасессии: сердце ставим последним,
         // чтобы индексы компактного вида (0, 1, 2) остались за «назад / пауза / вперёд»
-        if (s.hasTrack)
+        if (s.hasTrack && IslandNotification.option(this, IslandNotification.KEY_LIKE))
             b.addAction(action(s.liked ? R.drawable.ic_liked : R.drawable.ic_like, s.liked ? R.string.unlike : R.string.like,
                                "like"));
         Notification.MediaStyle style = new Notification.MediaStyle().setShowActionsInCompactView(0, 1, 2);

@@ -31,6 +31,9 @@ final class IslandNotification
     static final int NOTIFICATION_ID = 3;
     private static final String PREFS = "materialfy";
     private static final String KEY_ENABLED = "islandEnabled";
+    // Настройки → Воспроизведение: уведомление плеера в цвет обложки и сердце в карточке плеера (по умолчанию да)
+    static final String KEY_COLORIZE = "mediaColorized";
+    static final String KEY_LIKE = "mediaLikeButton";
     // vivo отверг остров на этой прошивке и версии приложения (см. checkVivoVerdict)
     private static final String KEY_VIVO_REJECTED = "islandVivoRejected";
     // vivo: прогресс острова обновляется не чаще, чем раз в 10 с (так советуют плееры, которые это делают)
@@ -115,6 +118,16 @@ final class IslandNotification
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, on).apply();
     }
 
+    static boolean option(Context context, String key)
+    {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(key, true);
+    }
+
+    static void setOption(Context context, String key, boolean on)
+    {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(key, on).apply();
+    }
+
     void update(Context context, PlaybackService.State s, Bitmap cover, Bitmap tracker, PendingIntent open,
                 Notification.Action previous, Notification.Action playPause, Notification.Action next)
     {
@@ -140,7 +153,9 @@ final class IslandNotification
 
         ensureChannel(context, nm);
         int progress = s.durationMs > 0 ? (int) Math.max(0, Math.min(1000, s.positionMs * 1000 / s.durationMs)) : 0;
-        int accent = accent(cover, 0xFF3A3A5C);
+        boolean colorize = option(context, KEY_COLORIZE);
+        // без цвета обложки: акцент системы
+        int accent = colorize ? accent(cover, 0xFF3A3A5C) : Notification.COLOR_DEFAULT;
         long remaining = s.durationMs > 0 ? Math.max(0, s.durationMs - s.positionMs) : 0;
         Notification.Builder b = new Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
@@ -173,9 +188,11 @@ final class IslandNotification
             // Live Update: система сама решает, повысить ли (пользователь может запретить в настройках)
             extras.putBoolean("android.requestPromotedOngoing", true);
             // styledByProgress выключать нельзя: тогда весь сегмент закрашен и полоска всегда полная
+            Notification.ProgressStyle.Segment segment = new Notification.ProgressStyle.Segment(1000);
+            if (colorize)
+                segment.setColor(accent);
             Notification.ProgressStyle style = new Notification.ProgressStyle().setProgress(progress)
-                .setProgressSegments(java.util.Collections.singletonList(
-                    new Notification.ProgressStyle.Segment(1000).setColor(accent)));
+                .setProgressSegments(java.util.Collections.singletonList(segment));
             if (tracker != null)
                 style.setProgressTrackerIcon(Icon.createWithBitmap(tracker));
             b.setStyle(style);

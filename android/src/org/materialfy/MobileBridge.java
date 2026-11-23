@@ -130,7 +130,16 @@ public final class MobileBridge
     public static void setIslandEnabled(Context context, boolean on)
     {
         IslandNotification.setEnabled(context, on);
-        PlaybackService.refreshIsland();
+        PlaybackService.refresh();
+    }
+
+    // Настройки уведомления плеера: "mediaColorized" (в цвет обложки), "mediaLikeButton" (сердце)
+    public static boolean mediaOption(Context context, String key) { return IslandNotification.option(context, key); }
+
+    public static void setMediaOption(Context context, String key, boolean on)
+    {
+        IslandNotification.setOption(context, key, on);
+        PlaybackService.refresh();
     }
 
     // Что мешает музыке играть в фоне (через запятую): "battery" — оптимизация батареи, "notifications" — уведомления
