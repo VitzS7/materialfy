@@ -142,7 +142,7 @@ final class IslandNotification
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(key, on).apply();
     }
 
-    void update(Context context, PlaybackService.State s, Bitmap cover, Bitmap tracker, PendingIntent open,
+    void update(Context context, PlaybackService.State s, Bitmap cover, int coverAccent, Bitmap tracker, PendingIntent open,
                 Notification.Action previous, Notification.Action playPause, Notification.Action next)
     {
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
@@ -172,7 +172,7 @@ final class IslandNotification
         int progress = s.durationMs > 0 ? (int) Math.max(0, Math.min(1000, s.positionMs * 1000 / s.durationMs)) : 0;
         boolean colorize = option(context, KEY_COLORIZE);
         // без цвета обложки: акцент системы
-        int accent = colorize ? accent(cover, 0xFF3A3A5C) : Notification.COLOR_DEFAULT;
+        int accent = colorize ? coverAccent : Notification.COLOR_DEFAULT;
         long remaining = s.durationMs > 0 ? Math.max(0, s.durationMs - s.positionMs) : 0;
         Notification.Builder b = new Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
@@ -210,7 +210,9 @@ final class IslandNotification
                 segment.setColor(accent);
             Notification.ProgressStyle style = new Notification.ProgressStyle().setProgress(progress)
                 .setProgressSegments(java.util.Collections.singletonList(segment));
-            if (tracker != null)
+            // ползунок как у слайдера приложения (вертикальная «таблетка» цвета акцента); без цвета обложки
+            // остаётся системный
+            if (tracker != null && colorize)
                 style.setProgressTrackerIcon(Icon.createWithBitmap(tracker));
             b.setStyle(style);
             // пока идёт время, чип показывает таймер до конца; название — только когда таймера нет

@@ -15,10 +15,9 @@ import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.Paint;
-import android.graphics.Shader;
+import android.graphics.RectF;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -102,10 +101,12 @@ public class PlaybackService extends Service
     };
     private String coverUrl = "";
     private Bitmap cover;
-    // уменьшенные копии для уведомлений: остров обновляется раз в секунду, и полная обложка (640 px, 1,6 МБ)
-    // каждый раз шла бы через Binder дважды (значок и ползунок полоски)
+    // уменьшенная копия для уведомлений: остров обновляется раз в секунду, и полная обложка (640 px, 1,6 МБ)
+    // каждый раз шла бы через Binder
     private Bitmap thumb;
-    private Bitmap tracker;
+    // ползунок полоски острова: рисуется под цвет акцента, перерисовывается, только когда цвет сменился
+    private Bitmap handle;
+    private int handleColor;
 
     private final BroadcastReceiver noisy = new BroadcastReceiver() {
         @Override
@@ -294,7 +295,6 @@ public class PlaybackService extends Service
             coverUrl = s.coverUrl;
             cover = null;
             thumb = null;
-            tracker = null;
             loadCover(coverUrl);
         }
         MediaMetadata.Builder meta = new MediaMetadata.Builder()
@@ -361,7 +361,12 @@ public class PlaybackService extends Service
         now.clockRunning = s.clockRunning;
         now.hasTrack = s.hasTrack;
         PendingIntent open = session != null ? session.getController().getSessionActivity() : null;
-        island.update(this, now, thumb, tracker, open,
+        int accent = IslandNotification.accent(thumb, 0xFF3A3A5C);
+        if (handle == null || handleColor != accent) {
+            handleColor = accent;
+            handle = handleBitmap(accent);
+        }
+        island.update(this, now, thumb, accent, handle, open,
                       s.canPrevious ? action(R.drawable.ic_skip_previous, R.string.previous, "previous") : null,
                       playPause(s.playing), s.canNext ? action(R.drawable.ic_skip_next, R.string.next, "next") : null);
     }
@@ -534,13 +539,11 @@ public class PlaybackService extends Service
                 return;
             final Bitmap full = scaled(bitmap, 640);
             final Bitmap small = scaled(full, 256);
-            final Bitmap round = circle(small, 96);
             MAIN.post(() -> {
                 if (!url.equals(coverUrl))
                     return;
                 cover = full;
                 thumb = small;
-                tracker = round;
                 apply();
             });
         });
@@ -555,14 +558,17 @@ public class PlaybackService extends Service
         return Bitmap.createScaledBitmap(src, Math.max(1, Math.round(w * k)), Math.max(1, Math.round(h * k)), true);
     }
 
-    // круглая обложка для ползунка полоски острова: квадратная картинка на тонкой полоске выглядит обрезанной
-    private static Bitmap circle(Bitmap src, int size)
+    // Ползунок как у Md3/Slider: вертикальная скруглённая «таблетка» цвета акцента. Квадратный холст: система
+    // вписывает значок в квадрат, и узкая картинка иначе растянулась бы
+    private static Bitmap handleBitmap(int color)
     {
-        Bitmap square = Bitmap.createScaledBitmap(src, size, size, true);
+        int size = 96;
         Bitmap out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        paint.setShader(new BitmapShader(square, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP));
-        new Canvas(out).drawCircle(size / 2f, size / 2f, size / 2f, paint);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(color);
+        float w = 22, h = 88;
+        new Canvas(out).drawRoundRect(new RectF((size - w) / 2f, (size - h) / 2f, (size + w) / 2f, (size + h) / 2f),
+                                      w / 2f, w / 2f, paint);
         return out;
     }
 }
