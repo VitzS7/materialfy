@@ -16,14 +16,16 @@ GridLayout {
     Layout.preferredWidth: 0
     // перенос контрола под подпись — с запасом ±16 px, иначе у границы строка мигала бы при растягивании
     property bool _stacked: false
+    // сколько оставить подписи рядом с контролом; на телефоне при 200 px у кнопки «Настроить» было по слову в строке
+    readonly property real _textMin: Theme.mobile ? 240 : 200
     function _updateStack() {
         if (width <= 0)
             return
-        const edge = slot.implicitWidth + 200
+        const edge = slot.implicitWidth + root._textMin
         _stacked = _stacked ? width < edge + 16 : width < edge - 16
     }
     onWidthChanged: _updateStack()
-    Component.onCompleted: _stacked = width > 0 && width < slot.implicitWidth + 200
+    Component.onCompleted: _stacked = width > 0 && width < slot.implicitWidth + _textMin
     columns: _stacked ? 1 : 2
     columnSpacing: 24
     rowSpacing: 10
