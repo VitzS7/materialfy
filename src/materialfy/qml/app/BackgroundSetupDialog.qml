@@ -156,12 +156,12 @@ Item {
                     delegate: RowLayout {
                         id: row
                         required property string modelData
-                        readonly property var data: root.info[modelData] ?? ({ icon: "settings", title: modelData, text: "" })
+                        readonly property var entry: root.info[modelData] ?? ({ icon: "settings", title: modelData, text: "" })
                         Layout.fillWidth: true
                         spacing: 14
                         Icon {
                             Layout.alignment: Qt.AlignTop
-                            name: row.data.icon
+                            name: row.entry.icon
                             size: 24
                             color: Theme.secondary
                         }
@@ -170,14 +170,14 @@ Item {
                             spacing: 6
                             Label {
                                 Layout.fillWidth: true
-                                text: row.data.title
+                                text: row.entry.title
                                 type: "titleSmall"
                                 wrapMode: Text.WordWrap
                                 elide: Text.ElideNone
                             }
                             Label {
                                 Layout.fillWidth: true
-                                text: row.data.text
+                                text: row.entry.text
                                 type: "bodySmall"
                                 color: Theme.fgSurfaceVariant
                                 wrapMode: Text.WordWrap
