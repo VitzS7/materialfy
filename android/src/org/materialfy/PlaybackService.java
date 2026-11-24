@@ -134,6 +134,13 @@ public class PlaybackService extends Service
         }
     };
 
+    // сколько ждём возврата фокуса, прежде чем считать паузу обычной
+    private static final long RESUME_WAIT_MS = 5 * 60 * 1000;
+    private final Runnable giveUpResume = () -> {
+        resumeOnFocusGain = false;
+        apply();
+    };
+
     private final AudioManager.OnAudioFocusChangeListener focusListener = change -> {
         switch (change) {
         case AudioManager.AUDIOFOCUS_GAIN:
@@ -290,6 +297,7 @@ public class PlaybackService extends Service
         if (running == this)
             running = null;
         MAIN.removeCallbacks(islandTick);
+        MAIN.removeCallbacks(giveUpResume);
         if (notifications != null)
             island.clear(notifications);
         abandonFocus();
@@ -361,9 +369,17 @@ public class PlaybackService extends Service
                                                s.positionNow(), s.clockRunning ? 1f : 0f, SystemClock.elapsedRealtime())
                                      .build());
 
+        // pausa por foco temporário (уведомление, звонок): мы сами продолжим, так что сервис и блокировки не отпускаем,
+        // иначе Xiaomi убивает процесс на паузе с погашенным экраном и музыка не возвращается
+        boolean waitingFocus = resumeOnFocusGain && !s.playing;
+        MAIN.removeCallbacks(giveUpResume);
+        if (waitingFocus)
+            MAIN.postDelayed(giveUpResume, RESUME_WAIT_MS);
         if (s.playing && s.local) {
             requestFocus();
             setNoisy(true);
+            acquireLocks();
+        } else if (waitingFocus) {
             acquireLocks();
         } else {
             setNoisy(false);
@@ -377,7 +393,7 @@ public class PlaybackService extends Service
             MAIN.postDelayed(islandTick, IslandNotification.tickMs(this));
 
         Notification notification = buildNotification();
-        if (s.playing) {
+        if (s.playing || waitingFocus) {
             goForeground(notification);
         } else {
             // на паузе уведомление можно смахнуть, а система может остановить сервис
