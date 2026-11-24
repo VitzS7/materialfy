@@ -10,6 +10,18 @@ Item {
 
     signal toggled(bool checked)
 
+    Accessible.role: Accessible.CheckBox
+    Accessible.checkable: true
+    Accessible.checked: checked
+    Accessible.onPressAction: root.activate()
+
+    function activate() {
+        if (!enabled)
+            return
+        checked = !checked
+        toggled(checked)
+    }
+
     implicitWidth: 52
     implicitHeight: 32
 
@@ -67,12 +79,9 @@ Item {
         id: area
         anchors.fill: parent
         anchors.margins: -4
-        hoverEnabled: true
+        hoverEnabled: !Theme.mobile
         enabled: root.enabled
         cursorShape: Qt.PointingHandCursor
-        onClicked: {
-            root.checked = !root.checked
-            root.toggled(root.checked)
-        }
+        onClicked: root.activate()
     }
 }

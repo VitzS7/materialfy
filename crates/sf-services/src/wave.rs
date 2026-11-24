@@ -406,6 +406,10 @@ impl WaveService {
         let uris: Vec<String> = tracks.iter().map(TrackItem::play_uri).collect();
         let cover = tracks.first().map(|t| t.cover.clone()).unwrap_or_default();
         let context = PlayContext::with_uri(contexts::RADIO, station).titled(title).with_cover(cover);
+        // первая строка — сразу: экран переключается на неё, пока грузится звук
+        if let Some(first) = tracks.first() {
+            self.player.remember(first.clone());
+        }
         self.player.play_uris(uris, 0, context);
     }
 
@@ -520,7 +524,7 @@ fn kind_label(seed: &str) -> &'static str {
 /// Подпись — заглушка kind_label на любом языке (заглушка сохраняется в настройках «Любой трек», язык мог смениться).
 fn is_kind_placeholder(label: &str, seed: &str) -> bool {
     let en = kind_label(seed);
-    label == en || mf_i18n::dictionary(mf_i18n::Lang::Ru).and_then(|ru| ru.get(en)).is_some_and(|ru| ru == label)
+    label == en || mf_i18n::translated_in_any(en, label)
 }
 
 fn playable(track: &TrackItem, hidden: &dyn Fn(&str) -> bool) -> bool {

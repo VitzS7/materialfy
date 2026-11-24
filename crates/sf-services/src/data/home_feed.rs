@@ -27,7 +27,7 @@ use sf_player::Session;
 use super::persisted;
 
 const URL: &str = "https://api-partner.spotify.com/pathfinder/v2/query";
-/// Язык подписей Spotify — язык интерфейса приложения ("en" | "ru").
+/// Язык подписей Spotify — язык интерфейса приложения ("en" | "ru" | "pt").
 pub fn locale() -> &'static str {
     mf_i18n::lang().code()
 }
@@ -449,7 +449,7 @@ pub async fn homeview(session: &Session) -> anyhow::Result<Vec<FeedSection>> {
 }
 
 /// Spotify's DJ: a playlist-like context made for each listener, offered in some markets only.
-pub const DJ_URI: &str = "spotify:playlist:37i9dQZF1EYkqdzj48dyYq";
+pub use md3_model::context::DJ_URI;
 
 /// The DJ's cover when this account has the DJ, else `None`. Spotify's own
 /// home feed for the web player leaves the DJ out, so this asks for a DJ
@@ -473,7 +473,7 @@ pub async fn dj_cover(session: &Session) -> Option<String> {
     Some(cover.unwrap_or_else(|| DJ_COVER.to_owned()))
 }
 
-const DJ_COVER: &str = "https://lexicon-assets.spotifycdn.com/Your-DJ-Cover-Art-640.png";
+use md3_model::context::DJ_COVER;
 
 /// Страница «Для тебя»: личные плейлисты Spotify по разделам.
 pub async fn made_for_you(http: &Http, session: &Session) -> anyhow::Result<Vec<FeedSection>> {
@@ -488,8 +488,8 @@ pub async fn made_for_you(http: &Http, session: &Session) -> anyhow::Result<Vec<
 }
 
 /// Топ исполнителей и треков за 4 недели (как «Топ» профиля веб-плеера).
-pub async fn top(http: &Http, session: &Session, limit: u32) -> anyhow::Result<(Vec<Artist>, Vec<Track>)> {
-    let input = json!({ "offset": 0, "limit": limit, "sortBy": "AFFINITY", "timeRange": "SHORT_TERM" });
+pub async fn top(http: &Http, session: &Session, limit: u32, time_range: &str) -> anyhow::Result<(Vec<Artist>, Vec<Track>)> {
+    let input = json!({ "offset": 0, "limit": limit, "sortBy": "AFFINITY", "timeRange": time_range });
     let variables = json!({
         "includeTopArtists": true,
         "topArtistsInput": input,

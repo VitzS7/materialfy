@@ -1,7 +1,7 @@
 //! Связки без QML (исполнитель «services-extra»): настройки → плеер (autoplay), сборка EngineConfig из настроек,
 //! медиаклавиши и системная панель «Сейчас играет» через fastframe-now-playing: Windows — SMTC (свой поток и
 //! скрытое окно, HWND Qt не нужен), macOS — Now Playing, Linux — MPRIS org.mpris.MediaPlayer2.materialfy.
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sf_auth::ProxyConfig;
@@ -17,15 +17,18 @@ use crate::AppRequest;
 /// не трогает (флаг перезапуска ведёт AuthService).
 pub fn spawn_settings_glue(rt: &Handle, settings: Arc<SettingsStore>, player: PlayerHandle) {
     apply_audio_fx(&settings);
+    apply_report_plays(&settings);
     let mut changes = settings.subscribe();
     rt.spawn(async move {
         loop {
             match changes.recv().await {
                 Ok(SettingKey::Autoplay) => player.set_autoplay(settings.get_bool(SettingKey::Autoplay)),
                 Ok(SettingKey::PlaybackSpeed | SettingKey::Crossfade | SettingKey::DjVoice) => apply_audio_fx(&settings),
+                Ok(SettingKey::ReportPlays) => apply_report_plays(&settings),
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     player.set_autoplay(settings.get_bool(SettingKey::Autoplay));
                     apply_audio_fx(&settings);
+                    apply_report_plays(&settings);
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Closed) => return,
@@ -41,6 +44,11 @@ fn apply_audio_fx(settings: &SettingsStore) {
     let seconds = settings.get_int(SettingKey::Crossfade).clamp(0, mf_platform::settings::CROSSFADE_MAX_S) as u64;
     fx::set_crossfade(Duration::from_secs(seconds));
     fx::set_dj_voice(settings.get_bool(SettingKey::DjVoice));
+}
+
+/// Отчёт о прослушиваниях в Spotify (HistoryService читает флаг на каждом конце трека).
+fn apply_report_plays(settings: &SettingsStore) {
+    sf_player::engine::play_report::set_enabled(settings.get_bool(SettingKey::ReportPlays));
 }
 
 /// EngineConfig из настроек: имя устройства (DeviceName или DevicesService::default_device_name), битрейт,
@@ -70,7 +78,7 @@ pub fn engine_config(settings: &SettingsStore, proxy: ProxyConfig) -> EngineConf
         audio_cache_limit: Some(cache_mb * 1024 * 1024),
         buffer_ms: sf_player::engine::sink::DEFAULT_BUFFER_MS,
         tap: sf_player::engine::vis::AudioTap::new(),
-        eq: Arc::new(Mutex::new(sf_player::engine::eq::EqSettings::default())),
+        eq: sf_player::engine::eq::shared(),
         proxy,
     }
 }

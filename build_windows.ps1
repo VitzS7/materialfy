@@ -146,7 +146,7 @@ Copy-Item (Join-Path $srcAssets "fonts") (Join-Path $assets "fonts") -Recurse   
 Get-ChildItem $srcAssets -File | Where-Object { $_.Extension -in ".svg", ".png" } |
     Copy-Item -Destination $assets
 
-$deployArgs = @("--qmldir", $srcQml, "--no-opengl-sw", "--no-compiler-runtime", "--translations", "ru")   # Qt's own strings for the Russian UI; English needs no catalog
+$deployArgs = @("--qmldir", $srcQml, "--no-opengl-sw", "--no-compiler-runtime", "--translations", "ru,pt")   # Qt's own strings for the Russian and Portuguese UI; English needs no catalog
 if ($CargoProfile -eq "release") { $deployArgs = @("--release") + $deployArgs }
 & $WinDeployQt @deployArgs (Join-Path $Stage $ExeName)
 if ($LASTEXITCODE -ne 0) { Abort "windeployqt failed with exit code $LASTEXITCODE" }

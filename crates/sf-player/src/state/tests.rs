@@ -34,20 +34,60 @@ fn headless() -> Core {
     core
 }
 
+#[test]
+fn dj_start_ignores_track_offsets_shuffle_and_repeat() {
+    let mut core = headless();
+    core.local.connected = true;
+    core.shuffle_wanted = true;
+    core.local.repeat = RepeatMode::Track;
+    core.play_context(PlayContext::with_uri("playlist", md3_model::context::DJ_URI), Some("spotify:track:spoiler".into()), Some(true));
+    let commands = engine_commands(&mut core);
+    let load = commands.iter().find_map(|cmd| match cmd { PlayerCommand::Load(load) => Some(load), _ => None }).expect("DJ load");
+    assert_eq!(load.context_uri.as_deref(), Some(md3_model::context::DJ_URI));
+    assert!(load.offset_uri.is_none());
+    assert!(load.offset_index.is_none());
+    assert_eq!(load.shuffle, Some(false));
+    assert_eq!(load.repeat, Some(RepeatMode::Off));
+    assert!(!core.shuffle_wanted);
+    assert_eq!(core.shown_context().kind, "dj");
+}
+
+#[test]
+fn restored_dj_context_overrides_a_stale_playlist_label() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:current");
+    let stale = PlayContext { kind: "playlist".into(), context_uri: Some(md3_model::context::DJ_URI.into()), title: "Old playlist".into(), cover: String::new() };
+    core.local.connected = true;
+    core.play_context(stale, None, None);
+    let shown = core.shown_context();
+    assert_eq!(shown.kind, "dj");
+    assert_eq!(shown.title, "DJ");
+}
+
 fn playing(core: &mut Core, uri: &str) {
     core.local.track = local_track(uri);
     core.local.playback = Playback::Playing;
 }
 
 fn loaded_queue(core: &mut Core, current: &str, next: &[&str]) {
-    let fetched = FetchedQueue { current: Some(song(current)), next: next.iter().map(|uri| song(uri)).collect(), context: None };
+    let fetched = FetchedQueue {
+        current: Some(song(current)),
+        next: next.iter().map(|uri| song(uri)).collect(),
+        context: None,
+        recommended: Vec::new(),
+    };
     let current = fetched.current.clone().map(|track| QItem { uid: 1000, track });
     let next = fetched.next.iter().enumerate().map(|(i, track)| QItem { uid: 1001 + i as u64, track: track.clone() });
     core.queue = Some(QueueData { current, next: next.collect() });
 }
 
 fn fetched(current: &str, next: &[&str]) -> FetchedQueue {
-    FetchedQueue { current: Some(song(current)), next: next.iter().map(|uri| song(uri)).collect(), context: None }
+    FetchedQueue {
+        current: Some(song(current)),
+        next: next.iter().map(|uri| song(uri)).collect(),
+        context: None,
+        recommended: Vec::new(),
+    }
 }
 
 fn queue_uris(core: &Core) -> (Option<String>, Vec<String>) {
@@ -77,6 +117,11 @@ fn engine_commands(core: &mut Core) -> Vec<PlayerCommand> {
         }
     }
     commands
+}
+
+/// Только запросы метаданных трека.
+fn info_calls(core: &mut Core) -> Vec<ApiCall> {
+    api_calls(core).into_iter().filter(|call| matches!(call, ApiCall::TrackInfo { .. })).collect()
 }
 
 fn api_calls(core: &mut Core) -> Vec<ApiCall> {
@@ -125,6 +170,32 @@ fn remote_snapshot(device: &str, uri: &str, is_playing: bool) -> RemoteSnapshot 
     }
 }
 
+/// Другое устройство забрало трек: прослушивание здесь закрывается сразу, недоигранным.
+#[test]
+fn a_takeover_ends_the_local_play_at_once_and_unfinished() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:a");
+    core.local.position_ms = 30_000;
+    core.on_now_playing_changed();
+    core.take_effects();
+    core.local.playback = Playback::Stopped;
+    core.remote = Some(remote_snapshot("phone", "spotify:track:a", true));
+    core.tick();
+    let ended: Vec<TrackEndedLite> = core
+        .take_effects()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Ended(ended) => Some(*ended),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended.len(), 1, "the play ends once, at the takeover");
+    assert!(ended[0].local && !ended[0].natural);
+    assert!(ended[0].played < 1.0);
+    core.tick();
+    assert!(!core.take_effects().iter().any(|effect| matches!(effect, Effect::Ended(_))));
+}
+
 // ---- Next и намерения ----------------------------------------------------------------------------
 
 /// Next сразу делает голову очереди текущей.
@@ -139,6 +210,73 @@ fn next_pops_the_queue_head_into_now_playing() {
     assert_eq!(next, vec!["spotify:track:c"]);
     assert_eq!(core.current_track_uri().as_deref(), Some("spotify:track:b"));
     assert_eq!(engine_commands(&mut core), [PlayerCommand::Next]);
+}
+
+/// Следующая песня очереди скачивается заранее, пока играет текущая.
+#[test]
+fn the_next_queue_track_is_preloaded_while_the_current_one_plays() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:a");
+    core.local.position_ms = 4_000;
+    loaded_queue(&mut core, "spotify:track:a", &["spotify:track:b", "spotify:track:c"]);
+    core.tick();
+    assert_eq!(engine_commands(&mut core), [PlayerCommand::Preload("spotify:track:b".into())]);
+    // повторный tick не заказывает ту же песню снова
+    core.tick();
+    assert!(engine_commands(&mut core).is_empty(), "одного заказа на пару треков достаточно");
+}
+
+/// Загрузка вперёд ждёт, пока текущий трек заиграет: сначала качается он сам.
+#[test]
+fn nothing_is_preloaded_before_the_current_track_plays() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:a");
+    core.local.position_ms = 500;
+    loaded_queue(&mut core, "spotify:track:a", &["spotify:track:b"]);
+    core.tick();
+    assert!(engine_commands(&mut core).is_empty(), "первые секунды трека — его собственные");
+
+    core.local.playback = Playback::Paused;
+    core.local.position_ms = 30_000;
+    core.tick();
+    assert!(engine_commands(&mut core).is_empty(), "на паузе вперёд не качаем");
+
+    core.local.playback = Playback::Playing;
+    core.tick();
+    assert_eq!(engine_commands(&mut core), [PlayerCommand::Preload("spotify:track:b".into())]);
+}
+
+/// Пока движок ещё тянет текущий трек, вперёд не заказываем: полоса нужна ему.
+#[test]
+fn nothing_is_preloaded_while_the_current_track_is_still_loading() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:a");
+    core.local.position_ms = 30_000;
+    core.local.loading = true;
+    loaded_queue(&mut core, "spotify:track:a", &["spotify:track:b"]);
+    core.tick();
+    assert!(engine_commands(&mut core).is_empty(), "текущий трек ещё качается");
+
+    core.local.loading = false;
+    core.tick();
+    assert_eq!(engine_commands(&mut core), [PlayerCommand::Preload("spotify:track:b".into())]);
+}
+
+/// На новом треке заказ вперёд вооружается заново: следующей становится песня после него.
+#[test]
+fn a_new_track_preloads_its_own_successor() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:a");
+    core.local.position_ms = 4_000;
+    loaded_queue(&mut core, "spotify:track:a", &["spotify:track:b", "spotify:track:c"]);
+    core.tick();
+    assert_eq!(engine_commands(&mut core), [PlayerCommand::Preload("spotify:track:b".into())]);
+
+    playing(&mut core, "spotify:track:b");
+    core.local.position_ms = 4_000;
+    loaded_queue(&mut core, "spotify:track:b", &["spotify:track:c"]);
+    core.tick();
+    assert_eq!(engine_commands(&mut core), [PlayerCommand::Preload("spotify:track:c".into())]);
 }
 
 /// Плеер-бар называет следующую песню сразу, из строки очереди.
@@ -216,6 +354,197 @@ fn an_update_of_the_previous_track_keeps_the_chosen_one_on_screen() {
     assert!(core.intent_track.is_some());
 }
 
+/// Клик по строке переключает экран сразу: выбранный трек показан и грузится, движок ещё молчит.
+/// «Играет» при этом не показываем: звука ещё нет, и полоса не должна идти вперёд.
+#[test]
+fn a_chosen_track_is_shown_before_the_engine_reports_it() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:old");
+    let items = vec![named("spotify:track:old", "Old"), named("spotify:track:new", "New")];
+    core.play_items(items, 1, PlayContext::new("search"));
+    let now = core.now_playing().expect("выбранный трек показан сразу");
+    assert_eq!(now.track.uri, "spotify:track:new");
+    assert!(now.loading, "до ответа движка — спиннер");
+    assert!(!now.playing, "трек ещё грузится — «играет» было бы враньём");
+    assert_eq!(core.current_track_uri().as_deref(), Some("spotify:track:new"));
+    // движок отдал этот трек — теперь он и правда играет
+    let mut started = core.local.clone();
+    started.track = local_track("spotify:track:new");
+    started.playback = Playback::Playing;
+    started.track_sequence += 1;
+    core.handle_local(started);
+    let now = core.now_playing().expect("трек на экране");
+    assert!(now.playing && !now.loading, "после старта — играет, спиннер снят");
+}
+
+/// Пауза и продолжение того же трека остаются мгновенными: оптимистичный ответ нужен именно им.
+#[test]
+fn pausing_the_playing_track_stays_instant() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:a");
+    core.toggle_play();
+    assert!(!core.believed_playing(), "пауза видна сразу, не дожидаясь движка");
+}
+
+/// Пока движок грузит выбранный трек, экран держит его, а не предыдущий: холодный старт бывает дольше 6 с.
+#[test]
+fn a_slow_load_keeps_the_chosen_track_on_screen() {
+    let mut core = headless();
+    core.local.connected = true;
+    playing(&mut core, "spotify:track:old");
+    let items = vec![named("spotify:track:old", "Old"), named("spotify:track:new", "New")];
+    core.play_items(items, 1, PlayContext::new("search"));
+    let mut loading = core.local.clone();
+    loading.loading = true;
+    core.handle_local(loading);
+    core.age_intent(PLAYBACK_HOLD + Duration::from_secs(1));
+    core.tick();
+    assert_eq!(core.current_track_uri().as_deref(), Some("spotify:track:new"));
+    // движок отдал выбранный трек — намерение снято, дальше источник истины он сам
+    let mut started = core.local.clone();
+    started.loading = false;
+    started.track = local_track("spotify:track:new");
+    started.track_sequence += 1;
+    core.handle_local(started);
+    assert!(core.intent_track.is_none());
+}
+
+/// Загрузка, которая не кончается, отдаёт экран реальному состоянию: спиннер не висит вечно.
+#[test]
+fn a_load_that_never_finishes_gives_up_at_the_ceiling() {
+    let mut core = headless();
+    core.local.connected = true;
+    playing(&mut core, "spotify:track:old");
+    let items = vec![named("spotify:track:old", "Old"), named("spotify:track:new", "New")];
+    core.play_items(items, 1, PlayContext::new("search"));
+    let mut loading = core.local.clone();
+    loading.loading = true;
+    core.handle_local(loading);
+    core.age_intent(INTENT_CEILING + Duration::from_secs(1));
+    core.tick();
+    assert!(core.intent_track.is_none());
+    assert_eq!(core.current_track_uri().as_deref(), Some("spotify:track:old"));
+}
+
+/// Второй клик отменяет первый: на экране последний выбранный, в движок последним ушёл он же.
+#[test]
+fn a_second_click_replaces_the_pending_track() {
+    let mut core = headless();
+    core.local.connected = true;
+    playing(&mut core, "spotify:track:old");
+    let items = vec![named("spotify:track:a", "A"), named("spotify:track:b", "B")];
+    core.play_items(items.clone(), 0, PlayContext::new("search"));
+    core.play_items(items, 1, PlayContext::new("search"));
+    assert_eq!(core.current_track_uri().as_deref(), Some("spotify:track:b"));
+    let loads: Vec<PlayerCommand> = engine_commands(&mut core)
+        .into_iter()
+        .filter(|command| matches!(command, PlayerCommand::Load(_)))
+        .collect();
+    assert!(
+        matches!(loads.as_slice(), [_, PlayerCommand::Load(load)] if load.offset_index == Some(1)),
+        "последним в движок ушёл выбранный трек"
+    );
+}
+
+/// Списки Web API не кладут строки в кэш ядра: клик по такому треку догружает его метаданные, и экран
+/// переключается на него ещё до звука, а не на безымянную заглушку.
+#[test]
+fn a_click_fetches_the_track_it_does_not_know() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:old");
+    // список из Web API: uri есть, в кэше ядра строки нет
+    core.play_uris(vec!["spotify:track:home".into(), "spotify:track:other".into()], 0, PlayContext::new("tracks"));
+    let calls = info_calls(&mut core);
+    assert!(
+        matches!(calls.as_slice(), [ApiCall::TrackInfo { uri, .. }] if uri == "spotify:track:home"),
+        "asked for the clicked track: {calls:?}"
+    );
+    let ApiCall::TrackInfo { request, uri } = calls[0].clone() else { unreachable!() };
+    core.handle_api(ApiReply::TrackInfo {
+        request,
+        uri: uri.clone(),
+        result: Ok(TrackItem { title: "Loaded".into(), artists: "Band".into(), ..named(&uri, "Loaded") }),
+    });
+    let now = core.now_playing().expect("строка показана");
+    assert_eq!(now.track.title, "Loaded", "метаданные доехали, пока грузился звук");
+    assert!(now.loading);
+    // повторно за тот же трек не спрашиваем
+    core.play_uris(vec!["spotify:track:home".into()], 0, PlayContext::new("tracks"));
+    assert!(info_calls(&mut core).is_empty(), "the row is cached now");
+}
+
+/// Строка очереди бывает безымянной заглушкой: такая запись не считается известной, метаданные всё равно
+/// спрашиваются — иначе экран так и остался бы с пустым названием.
+#[test]
+fn a_nameless_cached_row_still_asks_for_metadata() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:old");
+    core.remember(&song("spotify:track:stub"));
+    core.play_uris(vec!["spotify:track:stub".into()], 0, PlayContext::new("tracks"));
+    let calls = info_calls(&mut core);
+    assert!(
+        matches!(calls.as_slice(), [ApiCall::TrackInfo { uri, .. }] if uri == "spotify:track:stub"),
+        "asked for the nameless row: {calls:?}"
+    );
+    let ApiCall::TrackInfo { request, uri } = calls[0].clone() else { unreachable!() };
+    core.handle_api(ApiReply::TrackInfo { request, uri: uri.clone(), result: Ok(named(&uri, "Loaded")) });
+    assert_eq!(core.cached(&uri).map(|track| track.title.as_str()), Some("Loaded"), "the row is upgraded");
+}
+
+/// Безымянная строка очереди, пришедшая, пока ждём ответ, не отменяет запрос: иначе ответ выбросили бы.
+#[test]
+fn a_nameless_row_does_not_cancel_the_pending_metadata_request() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:old");
+    core.play_uris(vec!["spotify:track:y".into()], 0, PlayContext::new("tracks"));
+    let ApiCall::TrackInfo { request, uri } = info_calls(&mut core)[0].clone() else { unreachable!() };
+    core.remember(&song(&uri));
+    core.handle_api(ApiReply::TrackInfo { request, uri: uri.clone(), result: Ok(named(&uri, "Loaded")) });
+    assert_eq!(core.cached(&uri).map(|track| track.title.as_str()), Some("Loaded"));
+}
+
+/// Устаревший ответ не перебивает строку, которую уже принесли с другой стороны.
+#[test]
+fn a_stale_metadata_reply_is_dropped_once_the_row_is_known() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:old");
+    core.play_uris(vec!["spotify:track:x".into()], 0, PlayContext::new("tracks"));
+    let ApiCall::TrackInfo { request, uri } = info_calls(&mut core)[0].clone() else { unreachable!() };
+    core.remember(&named(&uri, "Fresh"));
+    core.handle_api(ApiReply::TrackInfo {
+        request,
+        uri: uri.clone(),
+        result: Ok(named(&uri, "Stale")),
+    });
+    assert_eq!(core.cached(&uri).map(|track| track.title.as_str()), Some("Fresh"));
+}
+
+/// Список знает только URI: запомненная заранее строка всё равно показывается сразу.
+#[test]
+fn a_remembered_track_shows_up_for_a_uri_list_play() {
+    let mut core = headless();
+    core.local.connected = true;
+    playing(&mut core, "spotify:track:old");
+    core.remember(&named("spotify:track:new", "New"));
+    core.play_uris(vec!["spotify:track:new".into()], 0, PlayContext::new("tracks"));
+    let now = core.now_playing().expect("строка нашлась в кэше");
+    assert_eq!(now.track.title, "New");
+    assert!(now.loading);
+}
+
+/// Недоступный трек librespot пропускает сам: сообщение называет трек, иначе смена песни выглядит
+/// самовольной.
+#[test]
+fn an_unavailable_track_is_named_in_the_notice() {
+    let mut core = headless();
+    core.remember(&named("spotify:track:gone", "Gone"));
+    playing(&mut core, "spotify:track:gone");
+    let mut failed = core.local.clone();
+    failed.error = Some(format!("{}: spotify:track:gone", crate::engine::player::UNAVAILABLE));
+    core.handle_local(failed);
+    assert_eq!(notices(&core), [mf_i18n::tf("“{0}” isn't available — moving on", &[&"Gone".to_owned()])]);
+}
+
 /// Отказ в ключе — испорченная сессия: переподключиться сразу, но не чаще раза в 30 с.
 #[test]
 fn a_refused_audio_key_reconnects_the_session() {
@@ -232,6 +561,34 @@ fn a_refused_audio_key_reconnects_the_session() {
     again.error = Some(crate::engine::player::AUDIO_KEY_REFUSED.into());
     core.handle_local(again);
     assert!(!core.take_effects().iter().any(|effect| matches!(effect, Effect::Reconnect)), "not twice in 30 s");
+}
+
+/// Ключ не выдан и после переподключения — говорим, что дело в аккаунте; сыгравший трек сбрасывает счёт.
+#[test]
+fn a_key_refused_again_after_a_reconnect_blames_the_account() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:honey");
+    let refuse = |core: &mut Core| {
+        let mut ok = core.local.clone();
+        ok.error = None;
+        ok.playback = Playback::Paused;
+        core.handle_local(ok.clone());
+        ok.error = Some(crate::engine::player::AUDIO_KEY_REFUSED.into());
+        core.handle_local(ok);
+        core.last_unavailable_reconnect = None; // как будто прошло 30 с
+        let shown = notices(core);
+        core.take_effects();
+        shown
+    };
+    let reconnecting = mf_i18n::t("Spotify audio dropped out. Reconnecting playback…");
+    assert!(refuse(&mut core).contains(&reconnecting));
+    assert!(refuse(&mut core).contains(&mf_i18n::t(KEY_REFUSED_FOR_ACCOUNT)));
+    let mut played = core.local.clone();
+    played.error = None;
+    played.playback = Playback::Playing;
+    core.handle_local(played);
+    core.take_effects();
+    assert!(refuse(&mut core).contains(&reconnecting), "a track that played resets the count");
 }
 
 /// Три «недоступно» за 20 с — тоже переподключение (по тексту, который движок пишет на самом деле).
@@ -1311,6 +1668,44 @@ fn a_shuffled_list_play_switches_shuffle_on_after_loading_straight() {
 }
 
 #[test]
+fn smart_shuffle_reloads_the_playlist_with_recommendations_and_back() {
+    let mut core = headless();
+    core.local.connected = true;
+    core.play_context(PlayContext::with_uri("playlist", "spotify:playlist:p"), Some("spotify:track:a".into()), None);
+    playing(&mut core, "spotify:track:a");
+    let _ = engine_commands(&mut core);
+    assert!(core.smart_shuffle_available());
+
+    core.set_smart_shuffle(true);
+    assert!(core.smart_shuffle() && core.shuffle_wanted);
+    assert!(matches!(
+        engine_commands(&mut core).as_slice(),
+        [PlayerCommand::Load(load)] if load.context_uri.as_deref() == Some("spotify:playlist:p?spotify-apply-lenses=enhance")
+            && load.offset_uri.as_deref() == Some("spotify:track:a")
+            && load.shuffle == Some(true)
+    ));
+
+    // играет рекомендация: в обычном плейлисте её нет — с начала
+    playing(&mut core, "spotify:track:rec");
+    core.age_intent(Duration::from_secs(60));
+    let mut queue = fetched("spotify:track:rec", &["spotify:track:b"]);
+    queue.recommended = vec!["spotify:track:rec".into()];
+    answer_latest(&mut core, Ok(queue));
+    assert!(core.queue_rows()[0].recommended);
+    core.set_shuffle(false);
+    assert!(!core.smart_shuffle() && !core.smart_wanted);
+    assert!(matches!(
+        engine_commands(&mut core).as_slice(),
+        [PlayerCommand::Load(load)] if load.context_uri.as_deref() == Some("spotify:playlist:p")
+            && load.offset_uri.is_none()
+            && load.shuffle.is_none()
+    ));
+
+    core.play_context(PlayContext::with_uri("album", "spotify:album:x"), None, None);
+    assert!(!core.smart_shuffle_available());
+}
+
+#[test]
 fn one_song_is_loaded_as_a_context() {
     let one = local_load(&PlayRequest::tracks(vec!["spotify:track:a".into()]), false);
     assert_eq!(one.context_uri.as_deref(), Some("spotify:track:a"));
@@ -1566,7 +1961,12 @@ fn shuffle_targets_active_remote_playback_without_a_device_id() {
 fn playing_with_no_device_asks_for_one() {
     let mut core = Core::new(0.5, false);
     core.play_uris(vec!["spotify:track:a".into()], 0, PlayContext::new("tracks"));
-    assert!(api_calls(&mut core).is_empty(), "Spotify is never asked to play “nowhere”");
+    // метаданные строки — чтение, устройство им не нужно; играть «нигде» не просим
+    let plays: Vec<ApiCall> = api_calls(&mut core)
+        .into_iter()
+        .filter(|call| matches!(call, ApiCall::Play { .. } | ApiCall::Remote { .. }))
+        .collect();
+    assert!(plays.is_empty(), "Spotify is never asked to play “nowhere”");
     assert_eq!(notices(&core), ["Choose a device or turn on playback on this computer"]);
     // движок подключается — запрос ждёт его
     let mut core = Core::new(0.5, false);
@@ -1620,7 +2020,7 @@ fn a_shuffled_play_does_not_start_at_track_one() {
     items[5].available = false;
     let mut starts = std::collections::HashSet::new();
     for _ in 0..40 {
-        core.shuffle_from(items.clone(), PlayContext::with_uri("playlist", "spotify:playlist:p"));
+        core.shuffle_from(items.clone(), PlayContext::with_uri("playlist", "spotify:playlist:p"), false);
         for command in engine_commands(&mut core) {
             if let PlayerCommand::Load(load) = command {
                 let start = load.offset_uri.expect("the start is named");
@@ -1726,6 +2126,57 @@ fn a_transfer_is_confirmed_by_a_poll_of_the_new_device() {
 }
 
 #[test]
+fn a_remote_track_without_data_takes_the_known_one() {
+    let mut core = headless();
+    core.remember(&TrackItem {
+        cover: "https://i.scdn.co/image/c".into(),
+        artists: "Daft Punk".into(),
+        ..named("spotify:track:a", "One More Time")
+    });
+    core.poll_remote();
+    let mut state = remote_snapshot("pc", "spotify:track:a", true).state;
+    state.item.as_mut().unwrap().duration_ms = 320_000;
+    core.handle_api(ApiReply::Playback { seq: core.remote_poll_seq, result: Ok(Some(state)) });
+    let now = core.now_playing().expect("the remote track is shown");
+    assert_eq!((now.track.title.as_str(), now.track.artists.as_str()), ("One More Time", "Daft Punk"));
+    assert_eq!(now.track.cover, "https://i.scdn.co/image/c");
+    assert_eq!(now.track.duration_ms, 320_000);
+}
+
+#[test]
+fn a_cluster_rows_metadata_names_the_track_when_the_session_cannot() {
+    use librespot_protocol::player::ProvidedTrack;
+
+    use super::connect::provided_item;
+
+    let mut track = ProvidedTrack { uri: "spotify:track:t1".into(), ..Default::default() };
+    // librespot-хозяин без метаданных — названия нет, остаётся запрос к сессии/Web API
+    assert_eq!(provided_item(&track, 200_000), None);
+    for (key, value) in [
+        ("title", "Harder, Better"),
+        ("artist_name", "Daft Punk"),
+        ("artist_uri", "spotify:artist:4tZwfgrHOc3mvqYlEYSvVi"),
+        ("album_title", "Discovery"),
+        ("album_uri", "spotify:album:2noRn2Aes5aoNVsU6iWThc"),
+        ("image_url", "spotify:image:ab67616d00001e02"),
+        ("image_large_url", "https://i.scdn.co/image/ab67616d0000b273"),
+    ] {
+        track.metadata.insert(key.into(), value.into());
+    }
+    let item = provided_item(&track, 200_000).expect("the row names the track");
+    assert_eq!((item.title.as_str(), item.artists.as_str(), item.album.as_str()), ("Harder, Better", "Daft Punk", "Discovery"));
+    assert_eq!((item.track_id.as_str(), item.uri.as_str()), ("t1", "spotify:track:t1"));
+    assert_eq!(item.album_id, "2noRn2Aes5aoNVsU6iWThc");
+    assert_eq!(item.artist_refs[0].id, "4tZwfgrHOc3mvqYlEYSvVi");
+    assert_eq!(item.cover, "https://i.scdn.co/image/ab67616d00001e02");
+    assert_eq!(item.cover_large, "https://i.scdn.co/image/ab67616d0000b273");
+    assert_eq!(item.duration_ms, 200_000);
+    // пустое название не считается
+    track.metadata.insert("title".into(), "  ".into());
+    assert_eq!(provided_item(&track, 0), None);
+}
+
+#[test]
 fn a_device_that_vanishes_twice_is_lost_and_playback_can_continue_here() {
     let mut core = headless();
     core.local.connected = true;
@@ -1788,7 +2239,9 @@ fn an_old_poll_answer_is_dropped() {
 #[test]
 fn local_idle_polls_every_twenty_seconds_not_four() {
     let mut core = headless();
+    play_on_phone(&mut core);
     assert_eq!(core.poll_interval(), REMOTE_POLL_ACTIVE);
+    core.remote = None;
     core.local.track = local_track("spotify:track:a");
     core.local.playback = Playback::Paused;
     assert_eq!(core.poll_interval(), REMOTE_POLL_IDLE);
@@ -1800,7 +2253,17 @@ fn an_unseen_idle_window_polls_less_often() {
     core.app_active = false;
     assert_eq!(core.poll_interval(), REMOTE_POLL_UNSEEN);
     core.app_active = true;
+    // нигде ничего не играет — спрашивать часто не о чем
+    assert_eq!(core.poll_interval(), REMOTE_POLL_IDLE);
+    play_on_phone(&mut core);
     assert_eq!(core.poll_interval(), REMOTE_POLL_ACTIVE);
+}
+
+fn play_on_phone(core: &mut Core) {
+    core.poll_remote();
+    let seq = core.remote_poll_seq;
+    let state = remote_snapshot("phone", "spotify:track:a", true).state;
+    core.handle_api(ApiReply::Playback { seq, result: Ok(Some(state)) });
 }
 
 #[test]
@@ -2053,6 +2516,9 @@ mod actor {
                         ApiReply::QueueBatchAdded { request, added: uris.len(), result: Ok(()) }
                     }
                     ApiCall::AlbumTracks { request, .. } => ApiReply::AlbumTracks { request, result: Ok(Vec::new()) },
+                    ApiCall::TrackInfo { request, uri, .. } => {
+                        ApiReply::TrackInfo { request, uri, result: Err(sf_api::ApiError::Network("no metadata".into())) }
+                    }
                 }
             })
         }
@@ -2080,6 +2546,9 @@ mod actor {
                         ApiReply::QueueBatchAdded { request, added: uris.len(), result: Ok(()) }
                     }
                     ApiCall::Remote { action, .. } => ApiReply::Remote { action, result: Ok(()) },
+                    ApiCall::TrackInfo { request, uri, .. } => {
+                        ApiReply::TrackInfo { request, uri, result: Err(sf_api::ApiError::Network("no metadata".into())) }
+                    }
                     other => panic!("unexpected call {other:?}"),
                 }
             })
@@ -2145,7 +2614,7 @@ mod actor {
             let (events, receiver_events) = broadcast::channel(1024);
             let web = Arc::new(FakeWeb::default());
             *web.queue.lock().unwrap() =
-                Some(FetchedQueue { current: Some(song("spotify:track:a")), next: vec![song("spotify:track:ctx")], context: None });
+                Some(FetchedQueue { current: Some(song("spotify:track:a")), next: vec![song("spotify:track:ctx")], context: None, recommended: Vec::new() });
             let actor =
                 Actor::new(
                     Core::new(0.5, false),
@@ -2206,6 +2675,17 @@ mod actor {
     }
 
     #[tokio::test]
+    async fn quitting_ends_the_song_still_playing() {
+        let mut rig = Rig::new();
+        rig.ready().await;
+        rig.playing("spotify:track:a", 1).await;
+        let ended = rig.actor.shutdown().expect("the open play ends on quit");
+        assert_eq!(ended.track.uri, "spotify:track:a");
+        assert!(ended.local);
+        assert!(rig.actor.shutdown().is_none(), "a play ends once");
+    }
+
+    #[tokio::test]
     async fn the_snapshot_and_its_events_follow_playback() {
         let mut rig = Rig::new();
         rig.ready().await;
@@ -2251,4 +2731,63 @@ mod actor {
         assert!(events.iter().any(|event| matches!(event, PlayerEvent::Notice(text) if text.contains("Choose a device"))));
         let _ = rig.tx.send(Msg::Restore(None));
     }
+}
+
+/// Пауза, пока грузится следующий трек, — пауза: строка показывает загрузку, а не «играет».
+#[test]
+fn pausing_during_a_switch_is_a_pause() {
+    let mut core = headless();
+    playing(&mut core, "spotify:track:a");
+    core.play_items(vec![named("spotify:track:a", "A"), named("spotify:track:new", "New")], 1, PlayContext::new("search"));
+    core.toggle_play();
+    assert!(!core.believed_playing());
+}
+
+/// Состояние движка: играет `uri` с названием `title` (новая загрузка трека).
+fn reported(core: &Core, uri: &str, title: &str) -> LocalState {
+    let mut state = core.local.clone();
+    state.track = Some(LocalTrack { uri: uri.into(), title: title.into(), ..Default::default() });
+    state.playback = Playback::Playing;
+    state.loading = false;
+    state.track_sequence += 1;
+    state
+}
+
+#[test]
+fn switching_smart_shuffle_keeps_the_playing_track_when_the_reload_lands_on_another_row() {
+    let mut core = headless();
+    core.local.connected = true;
+    core.play_context(PlayContext::with_uri("playlist", "spotify:playlist:p"), Some("spotify:track:a".into()), None);
+    core.handle_local(reported(&core, "spotify:track:a", "Song A"));
+    core.age_intent(Duration::from_secs(60));
+    let _ = engine_commands(&mut core);
+
+    core.set_smart_shuffle(true);
+    let _ = engine_commands(&mut core);
+    // librespot не нашёл строку в контексте с рекомендациями и начал с первой
+    core.handle_local(reported(&core, "spotify:track:first", "Another song"));
+    assert!(matches!(
+        engine_commands(&mut core).as_slice(),
+        [PlayerCommand::Load(load)] if load.context_uri.as_deref() == Some("spotify:playlist:p?spotify-apply-lenses=enhance")
+            && load.offset_uri.as_deref() == Some("spotify:track:a")
+    ));
+
+    // вторая попытка тоже мимо: больше не перезагружаем
+    core.handle_local(reported(&core, "spotify:track:first", "Another song"));
+    assert!(engine_commands(&mut core).is_empty());
+}
+
+#[test]
+fn a_smart_shuffle_reload_onto_a_relinked_version_of_the_same_song_is_not_retried() {
+    let mut core = headless();
+    core.local.connected = true;
+    core.play_context(PlayContext::with_uri("playlist", "spotify:playlist:p"), Some("spotify:track:a".into()), None);
+    core.handle_local(reported(&core, "spotify:track:a", "Song A"));
+    core.age_intent(Duration::from_secs(60));
+    let _ = engine_commands(&mut core);
+
+    core.set_smart_shuffle(true);
+    let _ = engine_commands(&mut core);
+    core.handle_local(reported(&core, "spotify:track:a-relinked", "Song A"));
+    assert!(engine_commands(&mut core).is_empty());
 }

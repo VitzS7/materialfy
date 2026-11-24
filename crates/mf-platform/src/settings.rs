@@ -35,15 +35,61 @@ pub enum SettingKey {
     NowPlayingBlur,
     NowPlayingDrift,
     AmbientBackground,
+    /// Canvas трека за плеером
+    Canvas,
+    /// непрозрачность видео Canvas, 0..1
+    CanvasOpacity,
+    /// Canvas и в островке
+    FloatingCanvas,
     CoverSpin,
     CoverPulse,
     CalmWhenInactive,
+    /// текст песни: "normal" (классика) | "spicy" (крупная строка со сглаженным градиентом) | "karaoke" (текущая строка крупнее)
+    LyricsMode,
+    /// множитель размера шрифта текста (базовый размер задаёт место вызова)
+    LyricsFontScale,
+    /// затемняющая подложка за текстом: "none" | "soft" | "strong"
+    LyricsScrim,
+    /// выравнивание текста песни: "left" | "center" | "right"
+    LyricsTextAlign,
+    /// режим заполнения: "word" | "line" | "off"
+    LyricsFillMode,
+    /// фильтр видимых строк: "all" | "three" | "one" | "1"…"15"
+    LyricsVisibleLines,
+    /// множитель градиента и свечения (0..2)
+    LyricsHighlight,
+    /// масштаб активной строки (0.0 — по стилю, либо 1.0…1.35)
+    LyricsActiveScale,
+    /// масштаб неактивных строк (0.0 — по стилю, либо 0.8…1.0)
+    LyricsIdleScale,
+    /// амплитуда волны слов (0.0…2.0)
+    LyricsWordBounce,
+    /// непрозрачность неактивных строк (0.15…0.75)
+    LyricsDimOpacity,
+    /// длительность скролла строки в мс (-1 — по стилю, либо 200…800)
+    LyricsScrollMs,
+    /// задержка каскада соседних строк в мс (-1 — по стилю, либо 0…80)
+    LyricsStaggerMs,
+    /// степень размытия неактивных строк (0..1)
+    LyricsBlurAmount,
+    /// множитель межстрочного интервала (0.8..1.6)
+    LyricsLineSpacing,
+    /// анимации прокрутки и переходов текста
+    LyricsAnimate,
+    /// показывать метку источника текста
+    LyricsShowSource,
+    /// сдвиг синхронизации в миллисекундах (-500..500)
+    LyricsSyncMs,
     /// "system" | "full" | "reduced" → Theme.reducedMotion
     Animations,
     /// режим для слабых ПК: "auto" (сам, когда кадры рисует процессор) | "on" | "off" → Theme.lowPower
     LowPowerMode,
-    /// язык интерфейса: "system" (как в ОС) | "en" | "ru" (mf_i18n::parse_setting); меняется на лету
+    /// выбор графического процессора для рендеринга: "auto" | "integrated" | "discrete"
+    GpuPreference,
+    /// язык интерфейса: "system" (как в ОС) | "en" | "ru" | "pt" (mf_i18n::parse_setting); меняется на лету
     Language,
+    /// масштаб интерфейса в процентах: 75 | 100 | 125 | 150 | 200 (QT_SCALE_FACTOR, после перезапуска)
+    UiScale,
     // Раскладка
     RightPanelOpen,
     RightPanelTab,
@@ -59,6 +105,10 @@ pub enum SettingKey {
     LibrarySort,
     /// скрытые полки главной через запятую (quick,recent,madeForYou,podcasts,topArtists,topTracks)
     HomeHidden,
+    /// сцена «Радио» на главной
+    HomeRadioHidden,
+    /// в боковой панели вместо списка плейлистов — последние добавленные/обновлённые
+    SidebarLibrary,
     // Воспроизведение (librespot)
     /// 96 | 160 | 320 кбит/с (смена — перезапуск движка)
     Bitrate,
@@ -80,16 +130,22 @@ pub enum SettingKey {
     Crossfade,
     /// the DJ's spoken lines between its tracks; changes on the fly
     DjVoice,
+    /// сообщать Spotify о прослушиваниях на этом ПК (gabo RawCoreStream), как официальный клиент; по умолчанию выкл.
+    ReportPlays,
     // Spotify Connect и сеть
     /// имя Connect-устройства; "" — «Materialfy · <имя ПК>»
     DeviceName,
     /// свой Client ID (личное приложение Web API); "" — нет
     WebClientId,
+    /// окно с инструкцией, когда общий Client ID упёрся в лимит: true — «больше не показывать»
+    ApiLimitTipDismissed,
     /// "off" | "system" | "http" | "socks"; пароль — в хранилище секретов (sf-auth, слот Proxy)
     ProxyMode,
     ProxyHost,
     ProxyPort,
     ProxyUsername,
+    /// обложки и картинки грузить напрямую, мимо прокси (по умолчанию — через него, как всё остальное)
+    CoversBypassProxy,
     // Локальные данные
     /// закреплённые URI (плейлисты/альбомы/станции), JSON-массив строк — get_string_list/set_string_list
     Pins,
@@ -100,6 +156,28 @@ pub enum SettingKey {
     // Поведение
     CloseToTray,
     WheelStep,
+    /// плеер поверх всего вне главного окна: "off" | "island" (островок у верхнего края экрана) | "taskbar" (в панели задач
+    /// Windows) | "both" (и то и другое, Windows)
+    FloatingPlayer,
+    /// вид островка и виджета: "black" (чёрный, как железо) | "color" (тёмный тон обложки со свечением)
+    FloatingPlayerStyle,
+    /// место виджета в панели задач: "tray" (у трея) | "left" | "appsLeft" | "appsRight" | доля 0..1 свободной ширины ("0.42")
+    TaskbarWidgetPos,
+    /// сколько раз под раскрытым островком показана подсказка с клавишами (до 3)
+    FloatingKeyHints,
+    FloatingHideFullscreen,
+    FloatingHideMaximized,
+    FloatingOffsetX,
+    FloatingScale,
+    FloatingEdge,
+    FloatingFreeX,
+    FloatingFreeY,
+    /// мониторы для островка: "" / "0" (основной) | "0,1" | "all"
+    FloatingIslandScreens,
+    /// мониторы для панели задач: "" / "0" (основной) | "0,1" | "all"
+    TaskbarScreens,
+    /// позиции на панели задач для каждого монитора: JSON {"0":"tray","1":"appsRight"}
+    TaskbarPositions,
     // Updates
     /// check GitHub Releases for a new version on startup and every 6 h (no network when off)
     AutoUpdateCheck,
@@ -126,7 +204,7 @@ pub enum SettingType {
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 53] = [
+    pub const ALL: [SettingKey; 95] = [
         SettingKey::ThemeMode,
         SettingKey::SchemeVariant,
         SettingKey::AccentFromCover,
@@ -137,12 +215,35 @@ impl SettingKey {
         SettingKey::NowPlayingBlur,
         SettingKey::NowPlayingDrift,
         SettingKey::AmbientBackground,
+        SettingKey::Canvas,
+        SettingKey::CanvasOpacity,
+        SettingKey::FloatingCanvas,
         SettingKey::CoverSpin,
         SettingKey::CoverPulse,
         SettingKey::CalmWhenInactive,
+        SettingKey::LyricsMode,
+        SettingKey::LyricsFontScale,
+        SettingKey::LyricsScrim,
+        SettingKey::LyricsTextAlign,
+        SettingKey::LyricsFillMode,
+        SettingKey::LyricsVisibleLines,
+        SettingKey::LyricsHighlight,
+        SettingKey::LyricsActiveScale,
+        SettingKey::LyricsIdleScale,
+        SettingKey::LyricsWordBounce,
+        SettingKey::LyricsDimOpacity,
+        SettingKey::LyricsScrollMs,
+        SettingKey::LyricsStaggerMs,
+        SettingKey::LyricsBlurAmount,
+        SettingKey::LyricsLineSpacing,
+        SettingKey::LyricsAnimate,
+        SettingKey::LyricsShowSource,
+        SettingKey::LyricsSyncMs,
         SettingKey::Animations,
         SettingKey::LowPowerMode,
+        SettingKey::GpuPreference,
         SettingKey::Language,
+        SettingKey::UiScale,
         SettingKey::RightPanelOpen,
         SettingKey::RightPanelTab,
         SettingKey::SidebarCollapsed,
@@ -154,6 +255,8 @@ impl SettingKey {
         SettingKey::LibraryView,
         SettingKey::LibrarySort,
         SettingKey::HomeHidden,
+        SettingKey::HomeRadioHidden,
+        SettingKey::SidebarLibrary,
         SettingKey::Bitrate,
         SettingKey::Normalisation,
         SettingKey::Gapless,
@@ -166,17 +269,34 @@ impl SettingKey {
         SettingKey::PlaybackSpeed,
         SettingKey::Crossfade,
         SettingKey::DjVoice,
+        SettingKey::ReportPlays,
         SettingKey::DeviceName,
         SettingKey::WebClientId,
+        SettingKey::ApiLimitTipDismissed,
         SettingKey::ProxyMode,
         SettingKey::ProxyHost,
         SettingKey::ProxyPort,
         SettingKey::ProxyUsername,
+        SettingKey::CoversBypassProxy,
         SettingKey::Pins,
         SettingKey::HiddenTracks,
         SettingKey::RadioSeeds,
         SettingKey::CloseToTray,
         SettingKey::WheelStep,
+        SettingKey::FloatingPlayer,
+        SettingKey::FloatingPlayerStyle,
+        SettingKey::TaskbarWidgetPos,
+        SettingKey::FloatingKeyHints,
+        SettingKey::FloatingHideFullscreen,
+        SettingKey::FloatingHideMaximized,
+        SettingKey::FloatingOffsetX,
+        SettingKey::FloatingScale,
+        SettingKey::FloatingEdge,
+        SettingKey::FloatingFreeX,
+        SettingKey::FloatingFreeY,
+        SettingKey::FloatingIslandScreens,
+        SettingKey::TaskbarScreens,
+        SettingKey::TaskbarPositions,
         SettingKey::AutoUpdateCheck,
         SettingKey::UpdateChannel,
         SettingKey::SkippedVersion,
@@ -196,12 +316,35 @@ impl SettingKey {
             NowPlayingBlur => "nowPlayingBlur",
             NowPlayingDrift => "nowPlayingDrift",
             AmbientBackground => "ambientBackground",
+            Canvas => "canvas",
+            CanvasOpacity => "canvasOpacity",
+            FloatingCanvas => "floatingCanvas",
             CoverSpin => "coverSpin",
             CoverPulse => "coverPulse",
             CalmWhenInactive => "calmWhenInactive",
+            LyricsMode => "lyricsMode",
+            LyricsFontScale => "lyricsFontScale",
+            LyricsScrim => "lyricsScrim",
+            LyricsTextAlign => "lyricsTextAlign",
+            LyricsFillMode => "lyricsFillMode",
+            LyricsVisibleLines => "lyricsVisibleLines",
+            LyricsHighlight => "lyricsHighlight",
+            LyricsActiveScale => "lyricsActiveScale",
+            LyricsIdleScale => "lyricsIdleScale",
+            LyricsWordBounce => "lyricsWordBounce",
+            LyricsDimOpacity => "lyricsDimOpacity",
+            LyricsScrollMs => "lyricsScrollMs",
+            LyricsStaggerMs => "lyricsStaggerMs",
+            LyricsBlurAmount => "lyricsBlurAmount",
+            LyricsLineSpacing => "lyricsLineSpacing",
+            LyricsAnimate => "lyricsAnimate",
+            LyricsShowSource => "lyricsShowSource",
+            LyricsSyncMs => "lyricsSyncMs",
             Animations => "animations",
             LowPowerMode => "lowPowerMode",
+            GpuPreference => "gpuPreference",
             Language => "language",
+            UiScale => "uiScale",
             RightPanelOpen => "rightPanelOpen",
             RightPanelTab => "rightPanelTab",
             SidebarCollapsed => "sidebarCollapsed",
@@ -213,6 +356,8 @@ impl SettingKey {
             LibraryView => "libraryView",
             LibrarySort => "librarySort",
             HomeHidden => "homeHidden",
+            HomeRadioHidden => "homeRadioHidden",
+            SidebarLibrary => "sidebarLibrary",
             Bitrate => "bitrate",
             Normalisation => "normalisation",
             Gapless => "gapless",
@@ -225,17 +370,34 @@ impl SettingKey {
             PlaybackSpeed => "playbackSpeed",
             Crossfade => "crossfade",
             DjVoice => "djVoice",
+            ReportPlays => "reportPlays",
             DeviceName => "deviceName",
             WebClientId => "webClientId",
+            ApiLimitTipDismissed => "apiLimitTipDismissed",
             ProxyMode => "proxyMode",
             ProxyHost => "proxyHost",
             ProxyPort => "proxyPort",
             ProxyUsername => "proxyUsername",
+            CoversBypassProxy => "coversBypassProxy",
             Pins => "pins",
             HiddenTracks => "hiddenTracks",
             RadioSeeds => "radioSeeds",
             CloseToTray => "closeToTray",
             WheelStep => "wheelStep",
+            FloatingPlayer => "floatingPlayer",
+            FloatingPlayerStyle => "floatingPlayerStyle",
+            TaskbarWidgetPos => "taskbarWidgetPos",
+            FloatingKeyHints => "floatingKeyHints",
+            FloatingHideFullscreen => "floatingHideFullscreen",
+            FloatingHideMaximized => "floatingHideMaximized",
+            FloatingOffsetX => "floatingOffsetX",
+            FloatingScale => "floatingScale",
+            FloatingEdge => "floatingEdge",
+            FloatingFreeX => "floatingFreeX",
+            FloatingFreeY => "floatingFreeY",
+            FloatingIslandScreens => "floatingIslandScreens",
+            TaskbarScreens => "taskbarScreens",
+            TaskbarPositions => "taskbarPositions",
             AutoUpdateCheck => "autoUpdateCheck",
             UpdateChannel => "updateChannel",
             SkippedVersion => "skippedVersion",
@@ -269,12 +431,35 @@ impl SettingKey {
             NowPlayingBlur => Float(1.0),
             NowPlayingDrift => Float(0.5),
             AmbientBackground => Bool(true),
+            Canvas => Bool(true),
+            CanvasOpacity => Float(0.5),
+            FloatingCanvas => Bool(false),
             CoverSpin => Bool(true),
             CoverPulse => Bool(true),
             CalmWhenInactive => Bool(true),
+            LyricsMode => Str("normal".into()),
+            LyricsFontScale => Float(1.0),
+            LyricsScrim => Str("none".into()),
+            LyricsTextAlign => Str("left".into()),
+            LyricsFillMode => Str("word".into()),
+            LyricsVisibleLines => Str("all".into()),
+            LyricsHighlight => Float(1.0),
+            LyricsActiveScale => Float(0.0),
+            LyricsIdleScale => Float(0.0),
+            LyricsWordBounce => Float(1.0),
+            LyricsDimOpacity => Float(0.35),
+            LyricsScrollMs => Int(-1),
+            LyricsStaggerMs => Int(-1),
+            LyricsBlurAmount => Float(1.0),
+            LyricsLineSpacing => Float(1.0),
+            LyricsAnimate => Bool(true),
+            LyricsShowSource => Bool(true),
+            LyricsSyncMs => Int(0),
             Animations => Str("system".into()),
             LowPowerMode => Str("auto".into()),
+            GpuPreference => Str("auto".into()),
             Language => Str("system".into()),
+            UiScale => Int(100),
             RightPanelOpen => Bool(false),
             RightPanelTab => Str("queue".into()),
             SidebarCollapsed => Bool(false),
@@ -286,6 +471,8 @@ impl SettingKey {
             LibraryView => Str("grid".into()),
             LibrarySort => Str("recent".into()),
             HomeHidden => Str(String::new()),
+            HomeRadioHidden => Bool(false),
+            SidebarLibrary => Bool(false),
             Bitrate => Int(320),
             Normalisation => Bool(true),
             Gapless => Bool(true),
@@ -298,17 +485,34 @@ impl SettingKey {
             PlaybackSpeed => Float(1.0),
             Crossfade => Int(0),
             DjVoice => Bool(true),
+            ReportPlays => Bool(false),
             DeviceName => Str(String::new()),
             WebClientId => Str(String::new()),
+            ApiLimitTipDismissed => Bool(false),
             ProxyMode => Str("system".into()),
             ProxyHost => Str(String::new()),
             ProxyPort => Str(String::new()),
             ProxyUsername => Str(String::new()),
+            CoversBypassProxy => Bool(false),
             Pins => Str(String::new()),
             HiddenTracks => Str(String::new()),
             RadioSeeds => Str(String::new()),
             CloseToTray => Bool(true),
             WheelStep => Int(150),
+            FloatingPlayer => Str("off".into()),
+            FloatingPlayerStyle => Str("black".into()),
+            TaskbarWidgetPos => Str("tray".into()),
+            FloatingKeyHints => Int(0),
+            FloatingHideFullscreen => Bool(true),
+            FloatingHideMaximized => Bool(false),
+            FloatingOffsetX => Int(0),
+            FloatingScale => Int(100),
+            FloatingEdge => Str("top".into()),
+            FloatingFreeX => Int(WINDOW_POS_UNSET),
+            FloatingFreeY => Int(WINDOW_POS_UNSET),
+            FloatingIslandScreens => Str(String::new()),
+            TaskbarScreens => Str(String::new()),
+            TaskbarPositions => Str(String::new()),
             AutoUpdateCheck => Bool(true),
             UpdateChannel => Str("stable".into()),
             SkippedVersion => Str(String::new()),
@@ -334,6 +538,114 @@ impl SettingKey {
                 SettingValue::Float(((speed.clamp(0.5, 2.0) * 20.0).round() / 20.0).clamp(0.5, 2.0))
             }
             (SettingKey::Crossfade, SettingValue::Int(seconds)) => SettingValue::Int(seconds.clamp(0, CROSSFADE_MAX_S)),
+            (SettingKey::LyricsFontScale, SettingValue::Float(v)) => {
+                SettingValue::Float(if v.is_finite() { v.clamp(0.7, 1.6) } else { 1.0 })
+            }
+            (SettingKey::LyricsHighlight, SettingValue::Float(v)) => {
+                SettingValue::Float(if v.is_finite() { v.clamp(0.0, 2.0) } else { 1.0 })
+            }
+            (SettingKey::LyricsActiveScale, SettingValue::Float(v)) => {
+                SettingValue::Float(if v.is_finite() && v >= 1.0 { v.clamp(1.0, 1.35) } else { 0.0 })
+            }
+            (SettingKey::LyricsIdleScale, SettingValue::Float(v)) => {
+                SettingValue::Float(if v.is_finite() && v > 0.0 { v.clamp(0.8, 1.0) } else { 0.0 })
+            }
+            (SettingKey::LyricsWordBounce, SettingValue::Float(v)) => {
+                SettingValue::Float(if v.is_finite() { v.clamp(0.0, 2.0) } else { 1.0 })
+            }
+            (SettingKey::LyricsDimOpacity, SettingValue::Float(v)) => {
+                SettingValue::Float(if v.is_finite() { v.clamp(0.15, 0.75) } else { 0.35 })
+            }
+            (SettingKey::LyricsScrollMs, SettingValue::Int(ms)) => {
+                SettingValue::Int(if ms == -1 { -1 } else { ms.clamp(200, 800) })
+            }
+            (SettingKey::LyricsStaggerMs, SettingValue::Int(ms)) => {
+                SettingValue::Int(if ms == -1 { -1 } else { ms.clamp(0, 80) })
+            }
+            (SettingKey::LyricsBlurAmount, SettingValue::Float(v)) => {
+                SettingValue::Float(if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 })
+            }
+            (SettingKey::LyricsLineSpacing, SettingValue::Float(v)) => {
+                SettingValue::Float(if v.is_finite() { v.clamp(0.8, 1.6) } else { 1.0 })
+            }
+            (SettingKey::LyricsSyncMs, SettingValue::Int(ms)) => {
+                SettingValue::Int(ms.clamp(-500, 500))
+            }
+            (SettingKey::FloatingScale, SettingValue::Int(percent)) => SettingValue::Int(percent.clamp(70, 200)),
+            (SettingKey::UiScale, SettingValue::Int(percent)) => {
+                // пресеты из настроек; значение из конфига вне пресетов — ближайший
+                let percent = percent.clamp(50, 250);
+                SettingValue::Int(
+                    [75i64, 100, 125, 150, 200]
+                        .into_iter()
+                        .min_by_key(|preset| (preset - percent).abs())
+                        .unwrap_or(100),
+                )
+            }
+            (SettingKey::LyricsTextAlign, SettingValue::Str(s)) => {
+                SettingValue::Str(match s.as_str() {
+                    "center" => "center",
+                    "right" => "right",
+                    _ => "left",
+                }.into())
+            }
+            (SettingKey::LyricsFillMode, SettingValue::Str(s)) => {
+                SettingValue::Str(match s.as_str() {
+                    "line" => "line",
+                    "off" => "off",
+                    _ => "word",
+                }.into())
+            }
+            (SettingKey::LyricsVisibleLines, SettingValue::Str(s)) => {
+                SettingValue::Str(match s.as_str() {
+                    "three" => "three".into(),
+                    "one" => "one".into(),
+                    "all" => "all".into(),
+                    other => match other.trim().parse::<u32>() {
+                        Ok(n) if (1..=15).contains(&n) => other.trim().into(),
+                        _ => "all".into(),
+                    },
+                })
+            }
+            (SettingKey::FloatingPlayer, SettingValue::Str(s)) => {
+                SettingValue::Str(match s.as_str() {
+                    "island" => "island",
+                    "taskbar" => "taskbar",
+                    "both" => "both",
+                    _ => "off",
+                }.into())
+            }
+            (SettingKey::FloatingEdge, SettingValue::Str(s)) => SettingValue::Str(
+                match s.as_str() {
+                    "bottom" => "bottom",
+                    "left" => "left",
+                    "right" => "right",
+                    "free" => "free",
+                    _ => "top",
+                }
+                .into(),
+            ),
+            (SettingKey::FloatingPlayerStyle, SettingValue::Str(s)) => {
+                SettingValue::Str(if s == "color" { "color" } else { "black" }.into())
+            }
+            (SettingKey::TaskbarWidgetPos, SettingValue::Str(s)) => SettingValue::Str(
+                if matches!(s.as_str(), "left" | "appsLeft" | "appsRight" | "tray") {
+                    s
+                } else {
+                    match s.trim().parse::<f64>() {
+                        Ok(f) if f.is_finite() => format!("{:.4}", f.clamp(0.0, 1.0)),
+                        _ => "tray".into(),
+                    }
+                },
+            ),
+            (SettingKey::FloatingKeyHints, SettingValue::Int(n)) => SettingValue::Int(n.clamp(0, 3)),
+            (SettingKey::GpuPreference, SettingValue::Str(s)) => {
+                SettingValue::Str(match s.as_str() {
+                    "integrated" => "integrated",
+                    "discrete" => "discrete",
+                    _ => "auto",
+                }.into())
+            }
             (SettingKey::UpdateChannel, SettingValue::Str(channel)) => {
                 SettingValue::Str(if channel.trim().eq_ignore_ascii_case("beta") { "beta" } else { "stable" }.into())
             }
@@ -544,6 +856,19 @@ impl SettingsStore {
             }
         }
         let _ = self.changes.send(key);
+        if key == SettingKey::LyricsMode {
+            // При смене стиля текста сбрасываем ручные параметры к значениям по умолчанию для стиля
+            for reset_key in [
+                SettingKey::LyricsActiveScale,
+                SettingKey::LyricsWordBounce,
+                SettingKey::LyricsDimOpacity,
+                SettingKey::LyricsScrollMs,
+                SettingKey::LyricsStaggerMs,
+                SettingKey::LyricsIdleScale,
+            ] {
+                self.set(reset_key, reset_key.default_value());
+            }
+        }
         true
     }
 
@@ -603,6 +928,11 @@ impl Backend for IniBackend {
 
     fn write(&self, name: &str, value: &SettingValue) -> std::io::Result<()> {
         let mut doc = self.doc.lock().unwrap_or_else(|e| e.into_inner());
+        // В этот же файл пишет и QSettings оболочки (QtCore.Settings в QML): без перечитывания запись отсюда
+        // затирала ключи, которые он добавил после запуска
+        if let Ok(bytes) = std::fs::read(&self.path) {
+            *doc = ini::Document::parse(&String::from_utf8_lossy(&bytes));
+        }
         let encoded = match value {
             SettingValue::Str(s) => ini::encode_string(&escape_at(s)),
             other => other.to_qt_string(),
@@ -942,7 +1272,7 @@ mod tests {
 
     #[test]
     fn schema() {
-        assert_eq!(SettingKey::ALL.len(), 53);
+        assert_eq!(SettingKey::ALL.len(), 95);
         for key in SettingKey::ALL {
             assert_eq!(SettingKey::from_name(key.name()), Some(key));
             assert_eq!(key.default_value().value_type(), key.value_type());
@@ -960,6 +1290,79 @@ mod tests {
         assert_eq!(SettingKey::PlaybackSpeed.normalize(Float(f64::NAN)), Float(1.0));
         assert_eq!(SettingKey::Crossfade.normalize(Int(-3)), Int(0));
         assert_eq!(SettingKey::Crossfade.normalize(Int(40)), Int(CROSSFADE_MAX_S));
+        assert_eq!(SettingKey::FloatingScale.normalize(Int(10)), Int(70));
+        assert_eq!(SettingKey::FloatingScale.normalize(Int(130)), Int(130));
+        assert_eq!(SettingKey::FloatingScale.normalize(Int(900)), Int(200));
+        assert_eq!(SettingKey::UiScale.normalize(Int(100)), Int(100));
+        assert_eq!(SettingKey::UiScale.normalize(Int(110)), Int(100));
+        assert_eq!(SettingKey::UiScale.normalize(Int(120)), Int(125));
+        assert_eq!(SettingKey::UiScale.normalize(Int(1)), Int(75));
+        assert_eq!(SettingKey::UiScale.normalize(Int(900)), Int(200));
+        assert_eq!(SettingKey::LyricsTextAlign.normalize(Str("auto".into())), Str("left".into()));
+        assert_eq!(SettingKey::LyricsTextAlign.normalize(Str("center".into())), Str("center".into()));
+        assert_eq!(SettingKey::LyricsTextAlign.normalize(Str("right".into())), Str("right".into()));
+        assert_eq!(SettingKey::LyricsFillMode.normalize(Str("auto".into())), Str("word".into()));
+        assert_eq!(SettingKey::LyricsFillMode.normalize(Str("line".into())), Str("line".into()));
+        assert_eq!(SettingKey::LyricsFillMode.normalize(Str("off".into())), Str("off".into()));
+        assert_eq!(SettingKey::LyricsVisibleLines.normalize(Str("auto".into())), Str("all".into()));
+        assert_eq!(SettingKey::LyricsVisibleLines.normalize(Str("three".into())), Str("three".into()));
+        assert_eq!(SettingKey::LyricsVisibleLines.normalize(Str("one".into())), Str("one".into()));
+        assert_eq!(SettingKey::FloatingPlayer.normalize(Str("island".into())), Str("island".into()));
+        assert_eq!(SettingKey::FloatingPlayer.normalize(Str("taskbar".into())), Str("taskbar".into()));
+        assert_eq!(SettingKey::FloatingPlayer.normalize(Str("both".into())), Str("both".into()));
+        assert_eq!(SettingKey::FloatingPlayer.normalize(Str("notch".into())), Str("off".into()));
+        assert_eq!(SettingKey::FloatingPlayerStyle.normalize(Str("color".into())), Str("color".into()));
+        assert_eq!(SettingKey::FloatingPlayerStyle.normalize(Str("pink".into())), Str("black".into()));
+        assert_eq!(SettingKey::FloatingEdge.normalize(Str("left".into())), Str("left".into()));
+        assert_eq!(SettingKey::FloatingEdge.normalize(Str("up".into())), Str("top".into()));
+        assert_eq!(SettingKey::TaskbarWidgetPos.normalize(Str("appsRight".into())), Str("appsRight".into()));
+        assert_eq!(SettingKey::TaskbarWidgetPos.normalize(Str("0.5".into())), Str("0.5000".into()));
+        assert_eq!(SettingKey::TaskbarWidgetPos.normalize(Str("7".into())), Str("1.0000".into()));
+        assert_eq!(SettingKey::TaskbarWidgetPos.normalize(Str("middle".into())), Str("tray".into()));
+        assert_eq!(SettingKey::FloatingKeyHints.normalize(Int(9)), Int(3));
+        assert_eq!(SettingKey::GpuPreference.normalize(Str("auto".into())), Str("auto".into()));
+        assert_eq!(SettingKey::GpuPreference.normalize(Str("integrated".into())), Str("integrated".into()));
+        assert_eq!(SettingKey::GpuPreference.normalize(Str("discrete".into())), Str("discrete".into()));
+        assert_eq!(SettingKey::GpuPreference.normalize(Str("custom".into())), Str("auto".into()));
+        assert_eq!(SettingKey::LyricsVisibleLines.normalize(Str("1".into())), Str("1".into()));
+        assert_eq!(SettingKey::LyricsVisibleLines.normalize(Str("5".into())), Str("5".into()));
+        assert_eq!(SettingKey::LyricsVisibleLines.normalize(Str("15".into())), Str("15".into()));
+        assert_eq!(SettingKey::LyricsVisibleLines.normalize(Str("0".into())), Str("all".into()));
+        assert_eq!(SettingKey::LyricsVisibleLines.normalize(Str("16".into())), Str("all".into()));
+        assert_eq!(SettingKey::LyricsActiveScale.normalize(Float(0.0)), Float(0.0));
+        assert_eq!(SettingKey::LyricsActiveScale.normalize(Float(0.5)), Float(0.0));
+        assert_eq!(SettingKey::LyricsActiveScale.normalize(Float(0.99)), Float(0.0));
+        assert_eq!(SettingKey::LyricsActiveScale.normalize(Float(1.0)), Float(1.0));
+        assert_eq!(SettingKey::LyricsActiveScale.normalize(Float(1.12)), Float(1.12));
+        assert_eq!(SettingKey::LyricsActiveScale.normalize(Float(1.5)), Float(1.35));
+        assert_eq!(SettingKey::LyricsActiveScale.normalize(Float(-0.2)), Float(0.0));
+        assert_eq!(SettingKey::LyricsActiveScale.normalize(Float(f64::NAN)), Float(0.0));
+        assert_eq!(SettingKey::LyricsIdleScale.normalize(Float(0.0)), Float(0.0));
+        assert_eq!(SettingKey::LyricsIdleScale.normalize(Float(-0.2)), Float(0.0));
+        assert_eq!(SettingKey::LyricsIdleScale.normalize(Float(f64::NAN)), Float(0.0));
+        assert_eq!(SettingKey::LyricsIdleScale.normalize(Float(0.5)), Float(0.8));
+        assert_eq!(SettingKey::LyricsIdleScale.normalize(Float(0.85)), Float(0.85));
+        assert_eq!(SettingKey::LyricsIdleScale.normalize(Float(1.5)), Float(1.0));
+        assert_eq!(SettingKey::LyricsWordBounce.normalize(Float(1.0)), Float(1.0));
+        assert_eq!(SettingKey::LyricsWordBounce.normalize(Float(2.5)), Float(2.0));
+        assert_eq!(SettingKey::LyricsWordBounce.normalize(Float(-0.5)), Float(0.0));
+        assert_eq!(SettingKey::LyricsWordBounce.normalize(Float(f64::NAN)), Float(1.0));
+        assert_eq!(SettingKey::LyricsDimOpacity.normalize(Float(0.35)), Float(0.35));
+        assert_eq!(SettingKey::LyricsDimOpacity.normalize(Float(0.1)), Float(0.15));
+        assert_eq!(SettingKey::LyricsDimOpacity.normalize(Float(0.9)), Float(0.75));
+        assert_eq!(SettingKey::LyricsDimOpacity.normalize(Float(f64::NAN)), Float(0.35));
+        assert_eq!(SettingKey::LyricsScrollMs.normalize(Int(-1)), Int(-1));
+        assert_eq!(SettingKey::LyricsScrollMs.normalize(Int(100)), Int(200));
+        assert_eq!(SettingKey::LyricsScrollMs.normalize(Int(450)), Int(450));
+        assert_eq!(SettingKey::LyricsScrollMs.normalize(Int(1200)), Int(800));
+        assert_eq!(SettingKey::LyricsStaggerMs.normalize(Int(-1)), Int(-1));
+        assert_eq!(SettingKey::LyricsStaggerMs.normalize(Int(-5)), Int(0));
+        assert_eq!(SettingKey::LyricsStaggerMs.normalize(Int(30)), Int(30));
+        assert_eq!(SettingKey::LyricsStaggerMs.normalize(Int(150)), Int(80));
+        assert_eq!(SettingKey::LyricsSyncMs.normalize(Int(-600)), Int(-500));
+        assert_eq!(SettingKey::LyricsSyncMs.normalize(Int(0)), Int(0));
+        assert_eq!(SettingKey::LyricsSyncMs.normalize(Int(250)), Int(250));
+        assert_eq!(SettingKey::LyricsSyncMs.normalize(Int(800)), Int(500));
     }
 
     #[test]
@@ -1213,13 +1616,19 @@ mod tests {
         let names: Vec<&str> = SettingKey::ALL.iter().map(|k| k.name()).collect();
         for name in [
             "themeMode", "schemeVariant", "accentFromCover", "customSeed", "windowButtons", "trackTransition",
-            "backdropMode", "nowPlayingBlur", "nowPlayingDrift", "ambientBackground", "coverSpin", "coverPulse",
-            "calmWhenInactive", "animations", "lowPowerMode", "rightPanelOpen", "rightPanelTab", "sidebarCollapsed", "windowWidth",
-            "windowHeight", "windowX", "windowY", "windowMaximized", "closeToTray", "wheelStep", "libraryView",
-            "librarySort", "homeHidden", "bitrate", "normalisation", "gapless", "autoplay", "volume", "audioDevice",
-            "audioCache", "audioCacheMb", "playbackAuthorized", "deviceName", "webClientId", "proxyMode", "proxyHost",
-            "proxyPort", "proxyUsername", "pins", "hiddenTracks", "radioSeeds", "language", "autoUpdateCheck",
-            "updateChannel", "skippedVersion",
+            "backdropMode", "nowPlayingBlur", "nowPlayingDrift", "ambientBackground", "canvas", "canvasOpacity", "floatingCanvas", "coverSpin", "coverPulse",
+            "calmWhenInactive", "lyricsMode", "lyricsFontScale", "lyricsScrim",
+            "lyricsTextAlign", "lyricsFillMode", "lyricsVisibleLines", "lyricsHighlight",
+            "lyricsActiveScale", "lyricsIdleScale", "lyricsWordBounce", "lyricsDimOpacity",
+            "lyricsScrollMs", "lyricsStaggerMs", "lyricsBlurAmount",
+            "lyricsLineSpacing", "lyricsAnimate", "lyricsShowSource", "lyricsSyncMs",
+            "animations", "lowPowerMode", "gpuPreference", "rightPanelOpen", "rightPanelTab", "sidebarCollapsed", "windowWidth",
+            "windowHeight", "windowX", "windowY", "windowMaximized", "closeToTray", "wheelStep", "floatingPlayer", "floatingPlayerStyle",
+            "taskbarWidgetPos", "floatingKeyHints", "floatingHideFullscreen", "floatingHideMaximized", "floatingOffsetX", "floatingScale", "floatingEdge", "floatingFreeX", "floatingFreeY", "libraryView",
+            "librarySort", "homeHidden", "homeRadioHidden", "sidebarLibrary", "bitrate", "normalisation", "gapless", "autoplay", "volume", "audioDevice",
+            "audioCache", "audioCacheMb", "playbackAuthorized", "deviceName", "webClientId", "apiLimitTipDismissed", "proxyMode", "proxyHost",
+            "proxyPort", "proxyUsername", "coversBypassProxy", "pins", "hiddenTracks", "radioSeeds", "language", "uiScale", "autoUpdateCheck",
+            "updateChannel", "skippedVersion", "reportPlays",
         ] {
             assert!(names.contains(&name), "{name}");
         }
@@ -1229,7 +1638,49 @@ mod tests {
         assert_eq!(SettingKey::ProxyPort.value_type(), SettingType::Str);
         assert_eq!(SettingKey::AudioCacheMb.value_type(), SettingType::Int);
         assert_eq!(SettingKey::Normalisation.value_type(), SettingType::Bool);
+        assert_eq!(SettingKey::ReportPlays.default_value(), SettingValue::Bool(false));
+        assert_eq!(SettingKey::LyricsScrollMs.default_value(), SettingValue::Int(-1));
+        assert_eq!(SettingKey::LyricsStaggerMs.default_value(), SettingValue::Int(-1));
+        assert_eq!(SettingKey::LyricsIdleScale.default_value(), SettingValue::Float(0.0));
         assert!(BITRATES.iter().any(|b| SettingKey::Bitrate.default_value() == SettingValue::Int(*b)));
+    }
+
+    #[test]
+    fn lyrics_mode_change_resets_manual_adjustments() {
+        let store = SettingsStore::in_memory();
+        // Задаём кастомные значения для шести ручных регулировок текста
+        store.set(SettingKey::LyricsActiveScale, SettingValue::Float(1.2));
+        store.set(SettingKey::LyricsWordBounce, SettingValue::Float(1.5));
+        store.set(SettingKey::LyricsDimOpacity, SettingValue::Float(0.6));
+        store.set(SettingKey::LyricsScrollMs, SettingValue::Int(350));
+        store.set(SettingKey::LyricsStaggerMs, SettingValue::Int(15));
+        store.set(SettingKey::LyricsIdleScale, SettingValue::Float(0.85));
+
+        // Изначальный режим — normal. Меняем на spicy: шесть регулировок должны сброситься к дефолтам стиля
+        assert!(store.set(SettingKey::LyricsMode, SettingValue::Str("spicy".into())));
+        assert_eq!(store.get(SettingKey::LyricsActiveScale), SettingValue::Float(0.0));
+        assert_eq!(store.get(SettingKey::LyricsWordBounce), SettingValue::Float(1.0));
+        assert_eq!(store.get(SettingKey::LyricsDimOpacity), SettingValue::Float(0.35));
+        assert_eq!(store.get(SettingKey::LyricsScrollMs), SettingValue::Int(-1));
+        assert_eq!(store.get(SettingKey::LyricsStaggerMs), SettingValue::Int(-1));
+        assert_eq!(store.get(SettingKey::LyricsIdleScale), SettingValue::Float(0.0));
+
+        // Пользователь настраивает параметры в новом режиме
+        store.set(SettingKey::LyricsActiveScale, SettingValue::Float(1.15));
+        store.set(SettingKey::LyricsWordBounce, SettingValue::Float(0.8));
+        store.set(SettingKey::LyricsDimOpacity, SettingValue::Float(0.5));
+        store.set(SettingKey::LyricsScrollMs, SettingValue::Int(400));
+        store.set(SettingKey::LyricsStaggerMs, SettingValue::Int(25));
+        store.set(SettingKey::LyricsIdleScale, SettingValue::Float(0.95));
+
+        // Повторное применение того же режима (spicy -> spicy) НЕ должно сбрасывать настройки
+        assert!(!store.set(SettingKey::LyricsMode, SettingValue::Str("spicy".into())));
+        assert_eq!(store.get(SettingKey::LyricsActiveScale), SettingValue::Float(1.15));
+        assert_eq!(store.get(SettingKey::LyricsWordBounce), SettingValue::Float(0.8));
+        assert_eq!(store.get(SettingKey::LyricsDimOpacity), SettingValue::Float(0.5));
+        assert_eq!(store.get(SettingKey::LyricsScrollMs), SettingValue::Int(400));
+        assert_eq!(store.get(SettingKey::LyricsStaggerMs), SettingValue::Int(25));
+        assert_eq!(store.get(SettingKey::LyricsIdleScale), SettingValue::Float(0.95));
     }
 
     #[test]
@@ -1239,6 +1690,22 @@ mod tests {
         let store = SettingsStore::with_backend(Box::new(IniBackend::open(path.clone())));
         assert!(store.set(SettingKey::WindowHeight, SettingValue::Int(900)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[General]\nwindowHeight=900\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn ini_keeps_keys_another_writer_added_after_opening() {
+        let path = temp_ini("shared");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let store = SettingsStore::with_backend(Box::new(IniBackend::open(path.clone())));
+        assert!(store.set(SettingKey::WindowHeight, SettingValue::Int(900)));
+        // QSettings оболочки (QtCore.Settings в QML) пишет в тот же файл, пока приложение работает
+        let text = std::fs::read_to_string(&path).unwrap() + "\n[Background]\ndismissed=true\n";
+        std::fs::write(&path, text).unwrap();
+        assert!(store.set(SettingKey::WindowWidth, SettingValue::Int(1000)));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[Background]\ndismissed=true\n"), "{text}");
+        assert!(text.contains("windowHeight=900\n") && text.contains("windowWidth=1000\n"), "{text}");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 }

@@ -12,6 +12,8 @@ TrackListPage {
             : Library.liked.loading && Library.liked.count === 0 ? I18n.t("Loading…")
             : I18n.n(Library.liked.count, "{0} track", "{0} tracks")
     model: Auth.state === "signedIn" ? Library.liked : null
+    // телефон: шапка над списком высокая, и приглашение войти (по центру страницы) ложилось поверх подписей
+    showHeader: Auth.state === "signedIn" || !Theme.mobile
     // не загрузилось (сессия не ответила, Web API под 429) — ошибка и «Повторить», а не «пусто»
     readonly property bool failed: Library.errorText !== ""
     emptyIcon: failed ? "cloud_off" : "favorite"

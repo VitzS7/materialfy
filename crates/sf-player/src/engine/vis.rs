@@ -5,6 +5,7 @@
 //! never moves it.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use librespot_playback::audio_backend::{Sink, SinkResult};
@@ -25,6 +26,9 @@ pub const LEVEL_SAMPLES: usize = SAMPLE_RATE as usize / 20;
 /// thread and whoever reads the level.
 pub struct AudioTap {
     samples: Mutex<VecDeque<f32>>,
+    /// Нужен ли уровень (core.levels_wanted): пока нет, `Tapped` не наполняет буфер —
+    /// даунмикс и блокировка на каждый пакет не нужны, пока обложка не «дышит».
+    wanted: AtomicBool,
 }
 
 impl std::fmt::Debug for AudioTap {
@@ -37,6 +41,7 @@ impl Default for AudioTap {
     fn default() -> Self {
         Self {
             samples: Mutex::new(VecDeque::with_capacity(KEPT)),
+            wanted: AtomicBool::new(false),
         }
     }
 }
@@ -44,6 +49,18 @@ impl Default for AudioTap {
 impl AudioTap {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Включает наполнение буфера. При включении сбрасываем накопленное раньше:
+    /// уровень не должен прыгнуть от сэмплов, отложенных до паузы чтения.
+    pub fn set_wanted(&self, value: bool) {
+        if !self.wanted.swap(value, Ordering::Relaxed) && value {
+            self.clear();
+        }
+    }
+
+    pub fn wanted(&self) -> bool {
+        self.wanted.load(Ordering::Relaxed)
     }
 
     /// Adds scaled stereo samples to the mono buffer.
@@ -174,19 +191,24 @@ impl Sink for Tapped {
         let packet = match packet {
             AudioPacket::Samples(mut samples) => {
                 self.eq.process(&mut samples);
-                // Post-EQ, pre-volume, pre-normalisation: the equalizer
-                // shapes what the bars show; the volume knob and the
-                // loudness housekeeping never move them.
-                let factor = f64::from_bits(
-                    self.normalisation
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                );
-                let restore = if factor > 0.05 && factor < 20.0 {
-                    (1.0 / factor).clamp(0.125, 8.0) as f32
-                } else {
-                    1.0
-                };
-                self.tap.push(&samples, restore);
+                // Наполняем буфер, только когда уровень кому-то нужен: пока обложка не
+                // «дышит» (core.levels_wanted), даунмикс половины секунды на каждый пакет —
+                // работа в никуда. Один Relaxed-загрузка на пакет.
+                if self.tap.wanted() {
+                    // Post-EQ, pre-volume, pre-normalisation: the equalizer
+                    // shapes what the bars show; the volume knob and the
+                    // loudness housekeeping never move them.
+                    let factor = f64::from_bits(
+                        self.normalisation
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    let restore = if factor > 0.05 && factor < 20.0 {
+                        (1.0 / factor).clamp(0.125, 8.0) as f32
+                    } else {
+                        1.0
+                    };
+                    self.tap.push(&samples, restore);
+                }
                 let attenuation = self.volume.attenuation_factor();
                 if self.applies_volume {
                     for sample in &mut samples {
@@ -260,7 +282,7 @@ mod tests {
             let control = crate::engine::sink::AudioControl::new(crate::engine::sink::DEFAULT_BUFFER_MS);
             let eq = crate::engine::eq::shared();
             {
-                let mut settings = eq.lock().unwrap();
+                let mut settings = eq.lock();
                 settings.on = equalizer_on;
                 settings.bands_db[0] = 12.0;
             }
@@ -310,6 +332,40 @@ mod tests {
         assert!(samples[..706].iter().all(|sample| *sample == 0.25));
         assert!(samples[706..].iter().all(|sample| *sample == 0.0));
     }
+    #[test]
+    fn the_tap_buffers_samples_only_while_the_level_is_wanted() {
+        let control = crate::engine::sink::AudioControl::new(crate::engine::sink::DEFAULT_BUFFER_MS);
+        let (mut tapped, _recorded) = recorded_tap(Arc::clone(&control), crate::engine::eq::shared());
+        // Пока уровень никому не нужен, пакеты не попадают в буфер:
+        // один пакет целиком внутри LAG-окна, level() его не увидит —
+        // проверяем буфер напрямую.
+        assert!(!tapped.tap.wanted());
+        write_level(&mut tapped, 0.25);
+        assert!(tapped
+            .tap
+            .samples
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty());
+        assert_eq!(tapped.tap.level(), 0.0);
+        // Спросили уровень: буфер наполняется, но level() смотрит на окно
+        // за LAG сэмплов до новейшего (LAG больше пакета) — пишем с запасом.
+        tapped.tap.set_wanted(true);
+        for _ in 0..8 {
+            write_level(&mut tapped, 0.25);
+        }
+        assert!(tapped.tap.level() > 0.0);
+        // Выключение и повторное включение сбрасывает буфер: отложенных
+        // сэмплов до паузы чтения остаться не должно.
+        tapped.tap.set_wanted(false);
+        tapped.tap.set_wanted(true);
+        assert!(tapped
+            .tap
+            .window(LEVEL_SAMPLES, 0)
+            .iter()
+            .all(|sample| *sample == 0.0));
+    }
+
     #[test]
     fn the_tap_mixes_stereo_down_and_pads_with_silence() {
         let tap = AudioTap::new();

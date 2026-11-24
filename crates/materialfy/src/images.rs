@@ -3,6 +3,7 @@
 //! только HTTP/1.1 (Http2AllowedAttribute = false: по HTTP/2 сервер обложек отвечает REFUSED_STREAM).
 //! Прокси — действующий у сервисов (AuthService::proxy / watch_proxy), тот же, что у запросов к Web API.
 use cxx_qt_lib::{QQmlApplicationEngine, QString};
+use mf_platform::SettingKey;
 use sf_services::{ProxyConfig, Services};
 use std::pin::Pin;
 
@@ -15,26 +16,39 @@ pub fn install_caching_nam(engine: Pin<&mut QQmlApplicationEngine>, rt: &tokio::
     crate::qt::ffi::ffi::engine_install_caching_nam(engine, &dir, CACHE_BYTES);
 
     let mut proxy = services.auth.watch_proxy();
-    apply_proxy(&proxy.borrow_and_update());
+    let settings = services.settings.clone();
+    let bypass = move || settings.get_bool(SettingKey::CoversBypassProxy);
+    apply_proxy(&proxy.borrow_and_update(), bypass());
+    let mut changes = services.settings.subscribe();
     // set_image_proxy потокобезопасен — из задачи tokio, без GUI-потока
     rt.spawn(async move {
-        while proxy.changed().await.is_ok() {
+        loop {
+            tokio::select! {
+                changed = proxy.changed() => if changed.is_err() { break },
+                key = changes.recv() => match key {
+                    Ok(SettingKey::CoversBypassProxy) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+            }
             let config = proxy.borrow_and_update().clone();
-            apply_proxy(&config);
+            apply_proxy(&config, bypass());
         }
     });
 }
 
 /// Режимы cpp/mf_shell.h: 0 — без прокси, 1 — системный, 2 — HTTP, 3 — SOCKS5, 4 — заблокировать.
-fn apply_proxy(config: &ProxyConfig) {
+/// `bypass` — «Обложки мимо прокси»: картинки напрямую, кроме неверных настроек (тогда блок, как у всего).
+fn apply_proxy(config: &ProxyConfig, bypass: bool) {
     let none = QString::default();
     let (mode, manual) = match config {
+        // сервисы при неверных настройках блокируют запросы — картинки тоже не идут напрямую
+        ProxyConfig::Invalid(_) => (4, None),
+        _ if bypass => (0, None),
         ProxyConfig::Off => (0, None),
         ProxyConfig::System => (1, None),
         ProxyConfig::Http(manual) => (2, Some(manual)),
         ProxyConfig::Socks(manual) => (3, Some(manual)),
-        // сервисы при неверных настройках блокируют запросы — картинки тоже не идут напрямую
-        ProxyConfig::Invalid(_) => (4, None),
     };
     match manual {
         Some(manual) => crate::qt::ffi::ffi::set_image_proxy(

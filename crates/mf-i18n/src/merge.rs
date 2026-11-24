@@ -14,7 +14,7 @@ impl<'de> serde::Deserialize<'de> for Pairs {
         impl<'de> Visitor<'de> for V {
             type Value = Pairs;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a flat JSON object of \"English\": \"Russian\" strings")
+                f.write_str("a flat JSON object of \"English source\": \"translation\" strings")
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Pairs, A::Error> {
                 let mut out = Vec::new();
@@ -28,8 +28,9 @@ impl<'de> serde::Deserialize<'de> for Pairs {
     }
 }
 
-/// Merges `(file name, file contents)` pairs into one dictionary.
-pub fn merge(files: &[(String, String)]) -> Result<BTreeMap<String, String>, String> {
+/// Merges `(file name, file contents)` pairs into one dictionary. `plural_forms` is how many translated forms a
+/// plural entry needs in this language: three for Russian (one|few|many), two for Portuguese (one|many).
+pub fn merge(files: &[(String, String)], plural_forms: usize) -> Result<BTreeMap<String, String>, String> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     let mut origin: BTreeMap<String, String> = BTreeMap::new();
     let mut errors = Vec::new();
@@ -48,9 +49,9 @@ pub fn merge(files: &[(String, String)]) -> Result<BTreeMap<String, String>, Str
             }
             if k.contains('|') {
                 let forms = v.split('|').count();
-                if k.split('|').count() != 2 || forms != 3 {
+                if k.split('|').count() != 2 || forms != plural_forms {
                     errors.push(format!(
-                        "{name}: plural entry {k:?} must have 2 English forms (one|many) and 3 Russian forms (one|few|many), got {forms}"
+                        "{name}: plural entry {k:?} must have 2 English forms (one|many) and {plural_forms} translated forms, got {forms}"
                     ));
                 }
             }

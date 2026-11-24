@@ -200,9 +200,9 @@ impl ApiGateway {
         self.limits.blocked(plan(operation, self.personal_ready()))
     }
 
-    /// Забыть кэш ответов GET (после записи мимо Web API, например через сессию librespot).
+    /// Забыть кэш ответов GET (после записи мимо Web API, например через сессию librespot); каталог остаётся.
     pub fn forget_cached(&self) {
-        self.limits.forget();
+        self.limits.forget_user_data();
     }
 
     fn session(&self, source: ApiSource) -> &Session {

@@ -6,6 +6,7 @@ use serde::Serialize;
 use sf_api::util::{station_seed, uri_id, uri_kind};
 
 use crate::extra::seeds::station_title;
+use crate::data::artist_overview::PreRelease;
 use crate::releases::NewRelease;
 
 /// Поисковые термины «Сделано для вас» (reference model.rs DISCOVER_TERMS).
@@ -28,12 +29,14 @@ pub const RECENT: &str = "recent";
 pub const MADE_FOR_YOU: &str = "madeForYou";
 /// «Новинки»: «Радар новинок» + свежие релизы исполнителей (ReleasesService)
 pub const NEW_RELEASES: &str = "newReleases";
+/// «Скоро»: анонсы исполнителей (обратный отсчёт в телефоне)
+pub const UPCOMING: &str = "upcoming";
 pub const PODCASTS: &str = "podcasts";
 pub const TOP_ARTISTS: &str = "topArtists";
 pub const TOP_TRACKS: &str = "topTracks";
 
 /// Порядок полок на главной.
-pub const ORDER: &[&str] = &[QUICK, RECENT, MADE_FOR_YOU, NEW_RELEASES, PODCASTS, TOP_ARTISTS, TOP_TRACKS];
+pub const ORDER: &[&str] = &[QUICK, RECENT, MADE_FOR_YOU, UPCOMING, NEW_RELEASES, PODCASTS, TOP_ARTISTS, TOP_TRACKS];
 
 /// Английский исходник; в снимок полки — через mf_i18n::t (shelf).
 pub fn title(key: &str) -> &'static str {
@@ -42,6 +45,7 @@ pub fn title(key: &str) -> &'static str {
         RECENT => "Recently played",
         MADE_FOR_YOU => "Made for you",
         NEW_RELEASES => "New releases",
+        UPCOMING => "Coming soon",
         PODCASTS => "Continue your podcasts",
         TOP_ARTISTS => "Top artists",
         TOP_TRACKS => "Top tracks",
@@ -103,12 +107,20 @@ pub fn made_for_you(term: &str, playlists: Vec<PlaylistItem>) -> Vec<PlaylistIte
 }
 
 pub fn playlist_entry(p: &PlaylistItem) -> LibraryEntry {
+    // DJ — не плейлист: у него нет списка треков, он только запускается (как кнопка)
+    let dj = p.uri == crate::data::home_feed::DJ_URI;
     LibraryEntry {
-        kind: "playlist".into(),
+        kind: if dj { "dj".into() } else { "playlist".into() },
         id: p.playlist_id.clone(),
         uri: if p.uri.is_empty() { format!("spotify:playlist:{}", p.playlist_id) } else { p.uri.clone() },
-        title: p.title.clone(),
-        subtitle: if p.owner.is_empty() { mf_i18n::t("Playlist") } else { mf_i18n::tf("Playlist · {0}", &[&p.owner]) },
+        title: if dj { "DJ".into() } else { p.title.clone() },
+        subtitle: if dj {
+            mf_i18n::t("Music and commentary picked for you")
+        } else if p.owner.is_empty() {
+            mf_i18n::t("Playlist")
+        } else {
+            mf_i18n::tf("Playlist · {0}", &[&p.owner])
+        },
         cover: p.cover.clone(),
         covers: if p.cover.is_empty() { Vec::new() } else { vec![p.cover.clone()] },
         owner: p.owner.clone(),
@@ -143,6 +155,32 @@ pub fn new_release_tiles(radar: Option<&PlaylistItem>, releases: &[NewRelease]) 
                 ..Default::default()
             }
         }))
+        .take(NEW_RELEASE_TILES)
+        .collect()
+}
+
+/// Плитки анонсов: до выхода релиз не открыть — плитка ведёт к исполнителю; подпись — исполнитель и день выхода.
+pub fn upcoming_tiles(upcoming: &[PreRelease]) -> Vec<LibraryEntry> {
+    let zone = jiff::tz::TimeZone::system();
+    let today = jiff::Zoned::now().date();
+    upcoming
+        .iter()
+        .map(|pre| {
+            let day = pre.release_at.parse::<jiff::Timestamp>().map(|at| at.to_zoned(zone.clone()).date());
+            let when = day.map(|day| crate::releases::date_label(day, today)).unwrap_or_default();
+            let details: Vec<&str> = [pre.artist.as_str(), when.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
+            LibraryEntry {
+                kind: "upcoming".into(),
+                id: pre.artist_id.clone(),
+                uri: format!("spotify:artist:{}", pre.artist_id),
+                title: pre.name.clone(),
+                subtitle: details.join(" · "),
+                cover: pre.cover.clone(),
+                covers: if pre.cover.is_empty() { Vec::new() } else { vec![pre.cover.clone()] },
+                read_only: true,
+                ..Default::default()
+            }
+        })
         .take(NEW_RELEASE_TILES)
         .collect()
 }
@@ -380,6 +418,24 @@ mod tests {
         assert_eq!((tiles[0].kind.as_str(), tiles[0].subtitle.as_str()), ("liked", "21 tracks"));
         assert_eq!(tiles[1].uri, "spotify:playlist:0");
         assert!(tiles[1].read_only);
+    }
+
+    #[test]
+    fn the_dj_row_is_a_button_not_a_playlist() {
+        let dj = PlaylistItem {
+            playlist_id: "37i9dQZF1EYkqdzj48dyYq".into(),
+            uri: crate::data::home_feed::DJ_URI.into(),
+            title: "DJ".into(),
+            owner: "Spotify".into(),
+            ..Default::default()
+        };
+        let entry = playlist_entry(&dj);
+        assert_eq!((entry.kind.as_str(), entry.title.as_str()), ("dj", "DJ"), "у DJ нет списка треков, он только играет");
+        assert_eq!(entry.subtitle, mf_i18n::t("Music and commentary picked for you"));
+        assert_eq!(entry.uri, crate::data::home_feed::DJ_URI);
+        assert_eq!(entry.owner, "Spotify", "остальные поля не тронуты");
+
+        assert_eq!(playlist_entry(&playlist("p", "Мой плейлист", "me")).kind, "playlist");
     }
 
     #[test]

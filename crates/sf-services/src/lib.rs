@@ -38,7 +38,7 @@ use tokio::sync::broadcast;
 use mf_platform::{SettingKey, SettingsStore};
 
 pub use auth::{AuthEvent, AuthService, AuthSnapshot, AuthState, PlaybackAuthState, ProxyInput};
-pub use sf_auth::{Grant, ManualProxy, ProxyConfig, ProxyMode};
+pub use sf_auth::{Grant, ManualProxy, ProxyConfig, ProxyMode, set_browser_opener};
 pub use catalog::{AlbumPage, ArtistPage, CatalogService, EpisodePage, SearchKind, SearchResults, ShowPage};
 pub use devices::{DevicesEvent, DevicesService, DevicesSnapshot};
 pub use history::{HistoryEvent, HistoryService, PlayRecord};
@@ -101,6 +101,23 @@ pub struct Services {
     media: Arc<Mutex<Option<glue::MediaStop>>>,
 }
 
+/// Настройка «Обложки мимо прокси» → флаг клиента обложек (меняется сразу, без перезапуска).
+fn follow_covers_bypass(rt: &Handle, settings: &Arc<SettingsStore>, direct: Arc<std::sync::atomic::AtomicBool>) {
+    let settings = settings.clone();
+    let mut changes = settings.subscribe();
+    rt.spawn(async move {
+        loop {
+            match changes.recv().await {
+                Ok(SettingKey::CoversBypassProxy) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    direct.store(settings.get_bool(SettingKey::CoversBypassProxy), std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 impl Services {
     /// Порядок: HTTP (прокси из настроек) → ApiGateway → PlayerHandle → Auth → History → Library → Catalog →
     /// Wave → Releases → Home → Lyrics → Devices → glue (настройки → плеер) → медиаклавиши.
@@ -112,11 +129,14 @@ impl Services {
             sf_api::Http::unavailable(error)
         });
         let api = Arc::new(ApiGateway::new(http.clone(), Arc::new(sf_api::NetActivity::default())));
+        let covers_direct = Arc::new(std::sync::atomic::AtomicBool::new(settings.get_bool(SettingKey::CoversBypassProxy)));
+        follow_covers_bypass(rt, &settings, covers_direct.clone());
         let config = PlayerConfig {
             cover_dir: mf_platform::dirs::cache_subdir("covers"),
             session_file: options.persist_session.then(mf_platform::dirs::session_file),
             volume: settings.get_f64(SettingKey::Volume).clamp(0.0, 1.0),
-            http: http.clone(),
+            // клиент только для обложек: по настройке «Обложки мимо прокси» — напрямую
+            http: http.bypassing(covers_direct),
         };
         let player = PlayerHandle::start(rt, config, api.clone()).map_err(|e| anyhow::anyhow!("player: {e}"))?;
         let store = sf_auth::Store::with_runtime(mf_platform::dirs::state_dir(), rt.clone());
@@ -147,7 +167,9 @@ impl Services {
         // тексты — через общий клиент: тот же прокси, что у Web API, смена применяется сразу
         let fetcher = {
             let http = http.clone();
+            let token = auth.musixmatch_token.clone();
             mf_lyrics::LyricsFetcher::with_source(mf_platform::dirs::cache_subdir("lyrics"), move || http.client())
+                .with_mxm_user_token(move || token.read().map(|t| t.clone()).unwrap_or_default())
         };
         let lyrics = LyricsService::new(rt.clone(), player.clone(), fetcher);
         let devices = DevicesService::new(rt.clone(), auth.clone(), player.clone(), settings.clone());
@@ -189,7 +211,10 @@ impl Services {
     /// При выходе (из GUI-потока после exec): сохранить сессию и историю, остановить движок и медиаклавиши.
     /// Блокирует ≤ 2 с.
     pub fn shutdown(&self) {
-        self.player.shutdown();
+        // последний трек сессии: его конец приходит только отсюда
+        if let Some(ended) = self.player.shutdown().filter(|ended| ended.local) {
+            self.history.note_played(ended.track, ended.context, ended.played);
+        }
         self.history.flush();
         if let Some(stop) = lock(&self.media).take() {
             stop.stop(Duration::from_millis(500));

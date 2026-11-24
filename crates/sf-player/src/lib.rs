@@ -33,6 +33,8 @@ pub const REMOTE_POLL_UNSEEN_S: u64 = 30;
 /// Удержания оптимистичного состояния (AGENTS.md), мс.
 pub const OPTIMISTIC_HOLD_MS: u64 = 2500;
 pub const PLAYBACK_HOLD_MS: u64 = 6000;
+/// Сколько выбранный трек держится на экране, пока движок его грузит (холодный старт бывает дольше 6 с).
+pub const INTENT_CEILING_MS: u64 = 20_000;
 pub const ASSUMED_CONTEXT_HOLD_MS: u64 = 8000;
 pub const REMOTE_RECHECK_MS: u64 = 1200;
 pub const QUEUE_RECHECK_MS: u64 = 700;
@@ -154,6 +156,10 @@ pub struct PlayerSnapshot {
     /// 0..1
     pub volume: f64,
     pub shuffle: bool,
+    /// Smart Shuffle: перемешивание с рекомендациями Spotify (shuffle тоже true)
+    pub smart_shuffle: bool,
+    /// Smart Shuffle можно включить (плейлист на этом ПК)
+    pub smart_shuffle_available: bool,
     pub repeat: Repeat,
     /// индекс строки section=current в queue, -1 — нет
     pub current_index: i32,

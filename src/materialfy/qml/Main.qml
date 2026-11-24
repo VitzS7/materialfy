@@ -18,6 +18,14 @@ Window {
     // --set browse=album:<id>,artist:<id>,back,home,panel,sidebar… — one step every 4 s once the session is up:
     // open a page, go back, switch a section, toggle the right panel or the sidebar (memory measurements)
     property string browse: ""
+    // --set floatingPlayer=island|taskbar|both|off — вместо настройки (снимки); --set islandState=idle|peek|compact|
+    // volume|announcement|expanded — вид островка; --set taskbarEmbed=false — виджет панели задач сразу поверх панели, без встраивания;
+    // --set floatingShot=<path.png> — снимок окна островка или виджета (и при --screenshot), --set taskbarTheme=dark|light
+    property string floatingPlayer: ""
+    property string islandState: ""
+    property bool taskbarEmbed: true
+    property string floatingShot: ""
+    property string taskbarTheme: ""
 
     // размер и положение — последние сохранённые (см. _restoreGeometry); окно показывается уже на месте
     width: 1280
@@ -37,6 +45,18 @@ Window {
     // Wayland: протокола «поверх всех окон» нет (GNOME, Weston флаг игнорируют), и окно не знает своих координат
     readonly property bool wayland: Qt.platform.pluginName.indexOf("wayland") === 0
     readonly property bool canPin: !wayland
+    // Плеер вне окна (Settings → Окно → «Плеер поверх окон»): островок — Windows, macOS, X11 и KDE Wayland (там его ставит скрипт KWin: окно
+    // не может встать у края экрана само), панель задач — только Windows
+    readonly property string floatingMode: {
+        const mode = floatingPlayer !== "" ? floatingPlayer : Settings.floatingPlayer
+        if (mode === "both" && Qt.platform.os === "windows")
+            return mode
+        if (mode === "island" && (!wayland || WindowShell.kwinAvailable()) && ["windows", "linux", "osx"].indexOf(Qt.platform.os) >= 0)
+            return mode
+        if (mode === "taskbar" && Qt.platform.os === "windows")
+            return mode
+        return "off"
+    }
     flags: Qt.Window | Qt.FramelessWindowHint | (pinnedOnTop ? Qt.WindowStaysOnTopHint : 0)
     // Linux/macOS: окно прозрачное, фон и скруглённые углы рисует WindowFrame (альфа-канал окна
     // включается цветом при создании, поэтому цвет не меняется по ходу работы)
@@ -292,6 +312,11 @@ Window {
 
                     Router {
                         id: router
+                        // settings/releases/liked строятся один раз и живут: первый вход инкубирует
+                        // (600–1200 мс), все следующие мгновенны. Параметрические (плейлисты,
+                        // артисты) — LRU-слоты в keepAliveSlots.
+                        keepAlive: ["home", "settings", "releases", "liked"]
+                        keepAliveSlots: 6
                         pages: ({
                             home: Qt.resolvedUrl("app/pages/HomePage.qml"),
                             search: Qt.resolvedUrl("app/pages/SearchPage.qml"),
@@ -305,6 +330,7 @@ Window {
                             episode: Qt.resolvedUrl("app/pages/EpisodePage.qml"),
                             radio: Qt.resolvedUrl("app/pages/RadioPage.qml"),
                             releases: Qt.resolvedUrl("app/pages/ReleasesPage.qml"),
+                            recents: Qt.resolvedUrl("app/pages/RecentsPage.qml"),
                             settings: Qt.resolvedUrl("app/pages/SettingsPage.qml"),
                             account: Qt.resolvedUrl("app/pages/AccountPage.qml"),
                             playback: Qt.resolvedUrl("app/pages/PlaybackSetupPage.qml")
@@ -313,6 +339,7 @@ Window {
                         // startPage=artist:<id> (album:, playlist:, show:, episode:) — страница с параметром. Каталог
                         // читается через сессию librespot, поэтому такая страница открывается, когда сессия поднялась
                         Component.onCompleted: {
+                            Qt.callLater(router._prewarm)   // до любого return: работает и без deep-link
                             const [name, id] = win.startPage.split(":")
                             if (!id) {
                                 reset(name)
@@ -446,6 +473,100 @@ Window {
         Component.onCompleted: Theme.wipe = themeWipe
     }
     Binding { target: Theme; property: "wipeDirection"; value: Player.direction }
+    // Уровень звука — полноэкранному плееру и мини-режиму («дыхание» обложки), полоскам островка и пульсу
+    // обложки в панели задач
+    Binding {
+        target: Player
+        property: "levelsWanted"
+        value: nowPlaying.wantsLevels || win._islandWantsLevels
+            || (taskbarWindow.object !== null && taskbarWindow.object.wantsLevels)
+    }
+
+    // ---- Плеер вне окна: живёт рядом с главным окном, и пока оно свёрнуто или в трее ----
+    function screenIndicesFromSetting(settingVal, screenCount) {
+        if (!settingVal || settingVal === "" || settingVal === "0")
+            return [0]
+        if (settingVal === "all") {
+            const arr = []
+            for (let i = 0; i < screenCount; ++i) arr.push(i)
+            return arr
+        }
+        const parts = settingVal.split(",")
+        const res = []
+        for (const p of parts) {
+            const idx = parseInt(p.trim(), 10)
+            if (!isNaN(idx) && idx >= 0 && idx < screenCount && res.indexOf(idx) === -1)
+                res.push(idx)
+        }
+        return res.length > 0 ? res : [0]
+    }
+
+    readonly property var activeIslandScreens: {
+        const screens = Qt.application.screens
+        const count = screens ? screens.length : 1
+        // macOS: на всех экранах, а покажется только тот, где есть вырез (FloatingIsland.qml)
+        return win.screenIndicesFromSetting(Qt.platform.os === "osx" ? "all" : Settings.floatingIslandScreens, count)
+    }
+
+    // островков по одному на монитор: object — только первый, а виден (и рисует полоски) может быть другой
+    readonly property bool _islandWantsLevels: {
+        for (let i = 0; i < islandWindow.count; ++i) {
+            const island = islandWindow.objectAt(i)
+            if (island && island.wantsLevels)
+                return true
+        }
+        return false
+    }
+
+    readonly property var activeTaskbarScreens: {
+        const screens = Qt.application.screens
+        const count = screens ? screens.length : 1
+        return win.screenIndicesFromSetting(Settings.taskbarScreens, count)
+    }
+
+    // Снимок (--screenshot) снимает только главное окно — плеер вне окна там не нужен (кроме floatingShot).
+    // Островок живёт и без трека (тонкая полоска у края), виджет в панели задач — только с треком
+    readonly property bool _floatingAllowed: floatingShot !== "" || !Qt.application.arguments.some(a => a.startsWith("--screenshot"))
+
+    Instantiator {
+        id: islandWindow
+        active: (win.floatingMode === "island" || win.floatingMode === "both") && win._floatingAllowed
+        model: win.activeIslandScreens
+        delegate: FloatingIsland {
+            required property int modelData
+            mainWindow: win
+            screenIndex: modelData
+            targetScreen: (Qt.application.screens && modelData < Qt.application.screens.length) ? Qt.application.screens[modelData] : null
+            forcedState: win.islandState
+            shotPath: win.floatingShot
+        }
+    }
+    Instantiator {
+        id: taskbarWindow
+        active: (win.floatingMode === "taskbar" || win.floatingMode === "both") && win._floatingAllowed && Player.hasTrack
+            && !_taskbarReset
+        property bool _taskbarReset: false
+        model: win.activeTaskbarScreens
+        delegate: TaskbarPlayer {
+            required property int modelData
+            mainWindow: win
+            screenIndex: modelData
+            targetScreen: (Qt.application.screens && modelData < Qt.application.screens.length) ? Qt.application.screens[modelData] : null
+            embed: win.taskbarEmbed
+            shotPath: win.floatingShot
+            forcedTheme: win.taskbarTheme
+            // Explorer перезапустился и унёс окно с собой — создать заново (не из обработчика самого окна)
+            onLost: taskbarRecreate.start()
+        }
+    }
+    Timer {
+        id: taskbarRecreate
+        interval: 0
+        onTriggered: {
+            taskbarWindow._taskbarReset = true
+            taskbarWindow._taskbarReset = false
+        }
+    }
     Binding {
         target: Theme
         property: "lowPower"
@@ -472,7 +593,7 @@ Window {
             // поиск по ссылке при уже открытом поиске — тот же экран с новым запросом
             const page = router.currentItem
             if (name === "search" && router.currentName === "search" && page && page.showQuery)
-                page.showQuery(Catalog.searchQuery)
+                page.showQuery(props.initialQuery ?? Catalog.searchQuery)
             else
                 router.push(name, props)
         }
@@ -510,21 +631,20 @@ Window {
         snackbar.show(text, actionText ?? "", onAction ?? null)
     }
 
-    // «Радио по треку / исполнителю»: сид на орбите главной, переход к сцене, «Слушать» в Snackbar
+    // «Радио по треку / исполнителю»: станция сразу играет, без перехода и без вопроса; сид выбран и на
+    // орбите главной, чтобы там было видно, что звучит. Пустой title — подпись подставит сервис.
     function radioFrom(seedUri, title) {
-        // мини-режим остаётся мини: волна сразу играет, без перехода к сцене на главной
-        if (win.mini) {
-            Radio.playStation(seedUri, title)
-            return
-        }
         Radio.select(seedUri)
+        Radio.playStation(seedUri, title)
+    }
+
+    // Настройки на нужном разделе (меню островка и виджета панели задач)
+    function openSettings(section) {
         if (nowPlaying.open)
             nowPlaying.hide()
-        if (router.rootName !== "home" || router.depth > 1)
-            router.reset("home")
-        else if (router.currentItem && router.currentItem.scrollToTop)
-            router.currentItem.scrollToTop()
-        notify(I18n.t("“{0}” radio: 50 tracks", title), I18n.t("Play"), () => Radio.play())
+        if (win.mini)
+            win.expandFromMini()
+        router.reset("settings", section ? { section: section } : undefined)
     }
 
     function trackMenuAction(id, track, item) {
@@ -606,6 +726,10 @@ Window {
         id: newPlaylistDialog
         z: 2100
     }
+    // общий Client ID упёрся в лимит: как подключить своё приложение
+    ApiLimitDialog {
+        z: 2120
+    }
     UpdateSheet {
         z: 2150
     }
@@ -667,8 +791,13 @@ Window {
                 return
             if (nowPlaying.open)
                 nowPlaying.hide()
+            // Поиск уже открыт: дедуп reset не перестроит страницу и focus не случится сам — зовём явно.
+            if (router.currentName === "search" && router.currentItem && router.currentItem.focusSearch) {
+                router.currentItem.focusSearch()
+                return
+            }
             router.reset("search")
-            Qt.callLater(() => router.currentItem && router.currentItem.focusSearch && router.currentItem.focusSearch())
+            // фокус берёт сама SearchPage в Component.onCompleted — при инкубации reset currentItem ещё старый
         }
     }
     Shortcut { sequence: "Ctrl+,"; onActivated: router.reset("settings") }

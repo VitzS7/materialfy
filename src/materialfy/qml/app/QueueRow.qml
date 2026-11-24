@@ -11,16 +11,19 @@ Item {
     property var track: ({})              // строка Player.queue (QUEUE_KEYS)
     property bool current: false
     property bool draggable: false
+    // место под ручку: только когда очередь вообще можно переставлять — иначе пустые 32 px слева у каждой строки
+    property bool reserveHandle: true
     property bool dragging: false
     property bool compact: false
-    readonly property bool hovered: rowHover.hovered
+    // на телефоне ручка и «⋯» видны всегда: наведения нет
+    readonly property bool hovered: rowHover.hovered || Theme.mobile
 
     signal activated()
     signal dragStarted()
     signal dragMoved(real dy)
     signal dragFinished()
 
-    implicitHeight: compact ? 56 : 64
+    implicitHeight: Theme.trackRowHeight(compact)
     implicitWidth: 300
 
     function openMenu(item, x, y) {
@@ -54,17 +57,26 @@ Item {
         radius: Theme.shape.large
         dragged: root.dragging
         onClicked: root.activated()
+        onPressAndHold: mouse => {
+            if (Theme.mobile) {
+                MobileShell.haptic()
+                root.openMenu(root, mouse.x, mouse.y)
+            }
+            else
+                mouse.accepted = false
+        }
     }
 
     RowLayout {
         anchors.fill: parent
-        anchors.leftMargin: 2
+        anchors.leftMargin: root.reserveHandle ? 2 : 10
         anchors.rightMargin: 10
         spacing: 10
         opacity: (root.track.available ?? true) ? 1 : Theme.stateLayer.disabledContent
 
         Item {
             id: handle
+            visible: root.reserveHandle
             Layout.preferredWidth: 22
             Layout.fillHeight: true
             Icon {
@@ -116,22 +128,38 @@ Item {
                 }
                 Rectangle {
                     visible: root.track.explicit === true
-                    implicitWidth: 16
-                    implicitHeight: 16
+                    implicitWidth: Math.max(16, Theme.type.labelSmall.size + 5)
+                    implicitHeight: Math.max(16, Theme.type.labelSmall.line)
                     radius: 4
                     color: Theme.surfaceContainerHighest
                     Label { anchors.centerIn: parent; text: "E"; type: "labelSmall"; color: Theme.fgSurfaceVariant }
                 }
+                // рекомендация Smart Shuffle
+                Icon {
+                    visible: root.track.recommended === true
+                    name: "auto_awesome"
+                    size: 16
+                    fill: 1
+                    color: Theme.primary
+                }
                 Item { Layout.fillWidth: true }
+            }
+            ArtistLinks {
+                Layout.fillWidth: true
+                visible: root.track.isEpisode !== true
+                refs: root.track.artistRefs ?? []
+                text: root.track.artists ?? ""
+                type: "bodyMedium"
+                color: Theme.fgSurfaceVariant
             }
             LinkLabel {
                 Layout.fillWidth: true
-                text: root.track.isEpisode ? (root.track.album || root.track.artists || "") : (root.track.artists ?? "")
+                visible: root.track.isEpisode === true
+                text: root.track.album || root.track.artists || ""
                 type: "bodyMedium"
                 color: Theme.fgSurfaceVariant
-                linkEnabled: (root.track.artistRefs ?? []).length > 0 || (root.track.isEpisode && (root.track.showId ?? "") !== "")
-                previewArtistId: !root.track.isEpisode && (root.track.artistRefs ?? []).length === 1 ? root.track.artistRefs[0].id : ""
-                onClicked: root.track.isEpisode ? Catalog.openShow(root.track.showId) : Catalog.openArtists(root.track.artistRefs)
+                linkEnabled: (root.track.showId ?? "") !== ""
+                onClicked: Catalog.openShow(root.track.showId)
             }
         }
 
@@ -140,7 +168,8 @@ Item {
         Item {
             Layout.preferredWidth: 36
             Layout.fillHeight: true
-            readonly property bool menuShown: root.hovered || moreButton.pressed || root.activeFocus
+            readonly property bool menuShown: root.hovered || root.activeFocus
+                                             || (menuLoader.item !== null && menuLoader.item.pressed)
             Label {
                 anchors.fill: parent
                 text: root._time(root.track.durationMs)
@@ -150,20 +179,27 @@ Item {
                 opacity: parent.menuShown ? 0 : 1
                 Behavior on opacity { NumberAnimation { duration: Theme.motion.effectsFast } }
             }
-            IconButton {
-                id: moreButton
+            // «⋯» создаётся с первого наведения и остаётся: строк много, а наведена одна
+            Loader {
+                id: menuLoader
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 width: 32
                 height: 32
-                icon: "more_horiz"
-                size: "xs"
-                iconSize: 22
-                iconWeight: 700
-                opacity: parent.menuShown ? 1 : 0
-                visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: Theme.motion.effectsFast } }
-                onClicked: root.openMenuAt(moreButton)
+                // активная с клавиатуры строка тоже показывает «⋯», иначе она скрывает длительность без кнопки
+                active: root.hovered || root.activeFocus || item !== null
+                sourceComponent: IconButton {
+                    id: moreButton
+                    anchors.fill: parent
+                    icon: "more_horiz"
+                    size: "xs"
+                    iconSize: 22
+                    iconWeight: 700
+                    opacity: (root.hovered || moreButton.pressed || root.activeFocus) ? 1 : 0
+                    visible: opacity > 0
+                    Behavior on opacity { NumberAnimation { duration: Theme.motion.effectsFast } }
+                    onClicked: root.openMenuAt(moreButton)
+                }
             }
         }
     }
@@ -171,6 +207,7 @@ Item {
     HoverHandler { id: rowHover }
     TapHandler {
         acceptedButtons: Qt.RightButton
+        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad   // касание — не правый клик: у него нет кнопок, TapHandler принял бы любой тап
         onTapped: point => root.openMenu(root, point.position.x, point.position.y)
     }
 }

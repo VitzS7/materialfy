@@ -11,6 +11,9 @@ Page {
 
     title: I18n.t("Home")
     showHeader: false
+    pullToRefresh: signedIn
+    refreshing: Home.loading
+    onPullRefresh: Home.refresh(true)
 
     readonly property bool signedIn: Auth.state === "signedIn"
     readonly property bool compact: width < 760
@@ -18,8 +21,23 @@ Page {
     // или переставились. Данные полки кладутся в её Loader на месте и только если изменились: обновление
     // «Недавно прослушанного» не пересоздаёт «Сделано для вас» и остальные плитки.
     property var shelfIds: []
+    property var djEntry: null
     function _syncShelves() {
-        const list = signedIn ? (Home.shelves ?? []) : []
+        const shelves = signedIn ? (Home.shelves ?? []) : []
+        let dj = null
+        const list = []
+        for (const shelf of shelves) {
+            const items = []
+            for (const entry of (shelf.items ?? [])) {
+                if (entry.kind === "dj")
+                    dj = entry
+                else
+                    items.push(entry)
+            }
+            if (items.length > 0)
+                list.push(Object.assign({}, shelf, {items: items}))
+        }
+        djEntry = dj
         const ids = list.map(s => ({ key: s.key ?? "", kind: s.kind ?? "" }))
         if (JSON.stringify(ids) !== JSON.stringify(shelfIds))
             shelfIds = ids
@@ -103,6 +121,7 @@ Page {
     }
     property var _menuEntry: null
     function showMenu(e, point) {
+        if ((e.kind ?? "") === "upcoming") return   // анонс: ни играть, ни закреплять нечего
         _menuEntry = e
         const k = e.kind ?? ""
         const items = [{ id: "play", text: I18n.t("Play"), icon: "play_arrow" }]
@@ -139,9 +158,54 @@ Page {
         }
     }
 
+    // DJ is a session, not a playlist preview. Surface only when Spotify supplies it.
+    Rectangle {
+        visible: page.djEntry !== null
+        Layout.fillWidth: true
+        Layout.topMargin: 8
+        implicitHeight: djContent.implicitHeight + 32
+        radius: Theme.shape.large
+        color: Theme.tertiaryContainer
+        RowLayout {
+            id: djContent
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 12
+            Icon { name: "mic"; size: 32; color: Theme.fgTertiaryContainer }
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+                Label {
+                    Layout.fillWidth: true
+                    text: I18n.t("Spotify DJ")
+                    type: "titleLarge"
+                    color: Theme.fgTertiaryContainer
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: I18n.t("Music picked for you, with your DJ")
+                    type: "bodyMedium"
+                    color: Theme.fgTertiaryContainer
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 3
+                }
+            }
+            IconButton {
+                size: "m"
+                style: "tonal"
+                icon: page.djEntry && page.isPlaying(page.djEntry) ? "pause" : "play_arrow"
+                Accessible.name: page.djEntry && page.isPlaying(page.djEntry) ? I18n.t("Pause DJ") : I18n.t("Listen to DJ")
+                onClicked: if (page.djEntry) page.playEntry(page.djEntry)
+            }
+        }
+    }
+
     // ---- Сцена «Радио» ----
     RadioOrbit {
         id: orbit
+        // сцена «Радио» видна по умолчанию; в настройках её можно скрыть — страница «Радио» и
+        // «Радио по треку» остаются
+        visible: Settings.homeRadioHidden !== true
         Layout.fillWidth: true
         Layout.topMargin: 8
         Layout.preferredHeight: implicitHeight
@@ -150,11 +214,22 @@ Page {
         premium: Auth.premium
         groups: page.signedIn ? Radio.seeds : []
         selected: Radio.selected
-        locked: page.signedIn && Radio.locked
-        loading: Radio.loading
+        // при запуске движок воспроизведения поднимается пару секунд: вход сохранён — это «подключаемся»,
+        // а не приглашение подключить воспроизведение
+        connecting: page.signedIn && Radio.locked && Settings.playbackAuthorized
+                    && (Auth.playbackState === "none" || Auth.playbackState === "connecting")
+        locked: page.signedIn && Radio.locked && !connecting
+        loading: Radio.loading || connecting
+        // «Сейчас играет» — только если играет выбранная станция: выбор на орбите её ещё не запускает
         playing: Radio.active && Player.playing
+                 && (Radio.selected === "" || Player.contextUri === "spotify:station:" + Radio.selected.replace(/^spotify:/, ""))
         errorText: Radio.errorText
-        onPicked: uri => Radio.select(uri)
+        onPicked: uri => {
+            Radio.select(uri)
+            // телефон: тап по сиду сразу включает станцию (на компьютере — выбор, запуск большой кнопкой)
+            if (Theme.mobile)
+                Radio.play()
+        }
         onAddRequested: item => finder.open(item)
         onPlayClicked: Radio.play()
         onOpenList: page.router.push("radio", { seed: Radio.selected })
@@ -199,7 +274,7 @@ Page {
                 Row {
                     id: skelRow
                     spacing: 24
-                    Repeater { model: 6; SkeletonTile { size: 168 } }
+                    Repeater { model: 6; SkeletonTile { size: Theme.mobile ? 144 : 168 } }
                 }
             }
         }
@@ -275,8 +350,8 @@ Page {
             }
             GridLayout {
                 Layout.fillWidth: true
-                Layout.leftMargin: -12
-                Layout.rightMargin: -12
+                Layout.leftMargin: Theme.mobile ? -8 : -12
+                Layout.rightMargin: Theme.mobile ? -8 : -12
                 columns: page.compact ? 1 : 2
                 columnSpacing: 16
                 rowSpacing: 0
@@ -303,7 +378,11 @@ Page {
                         available: modelData.available ?? true
                         liked: Library.likesRevision >= 0 && Library.isLiked(trackId)
                         current: trackId !== "" && trackId === Player.trackId
-                        onActivated: Player.playUris(tracksCol.tracks.map(t => t.uri), index)
+                        onActivated: {
+                            // строка главной приходит из Web API, а не из каталога: без неё экран ждал бы звука
+                            Player.rememberTrack(modelData)
+                            Player.playUris(tracksCol.tracks.map(t => t.uri), index)
+                        }
                         onLikeClicked: Library.toggleLike(modelData)
                     }
                 }
@@ -318,6 +397,8 @@ Page {
             id: rowCol
             readonly property var shelfData: parent ? parent.shelfData : ({})
             readonly property string kind: shelfData.kind ?? "tiles"
+            // Полка шире страницы? Условие для стрелок листания (см. ниже, почему не через `visible`)
+            readonly property bool scrollable: strip.contentWidth > strip.width + 1
             spacing: 12
             RowLayout {
                 Layout.fillWidth: true
@@ -328,11 +409,12 @@ Page {
                     Layout.fillWidth: true
                     Layout.maximumWidth: Math.ceil(implicitWidth)
                     text: rowCol.shelfData.title ?? ""
-                    type: "headlineSmall"
+                    type: Theme.mobile ? "titleLarge" : "headlineSmall"
                     weight: 600
                 }
                 Icon {
-                    visible: rowCol.shelfData.key === "madeForYou"
+                    // подсказка по наведению — на телефоне её не открыть
+                    visible: rowCol.shelfData.key === "madeForYou" && !Theme.mobile
                     name: "info"
                     size: 20
                     color: Theme.fgSurfaceVariant
@@ -365,32 +447,45 @@ Page {
                     color: Theme.fgSurfaceVariant
                 }
                 Item { Layout.fillWidth: true }
+                // Стрелки не скрываются через `visible`: показ/скрытие меняет ширину строки, от неё
+                // зависит `strip.width`, и условие «контент шире полки» начинало мигать — ColumnLayout
+                // переполировывался бесконечно (в раскладке полки «possible polish() loop», карточки
+                // наезжали друг на друга). Место под стрелки занято всегда, а невидимые выключены.
+                // телефон: полку листают пальцем — стрелок нет (место под них тоже не нужно: условие не мигает,
+                // Theme.mobile постоянен)
                 IconButton {
+                    visible: !Theme.mobile
                     icon: "chevron_left"
                     size: "xs"
-                    enabled: !strip.atXBeginning
-                    visible: strip.contentWidth > strip.width
+                    enabled: rowCol.scrollable && !strip.atXBeginning
+                    opacity: rowCol.scrollable ? 1 : 0
                     onClicked: strip.pageBy(-1)
                 }
                 IconButton {
+                    visible: !Theme.mobile
                     icon: "chevron_right"
                     size: "xs"
-                    enabled: !strip.atXEnd
-                    visible: strip.contentWidth > strip.width
+                    enabled: rowCol.scrollable && !strip.atXEnd
+                    opacity: rowCol.scrollable ? 1 : 0
                     onClicked: strip.pageBy(1)
                 }
             }
             ListView {
                 id: strip
                 Layout.fillWidth: true
-                Layout.leftMargin: -32
-                Layout.rightMargin: -32
-                Layout.preferredHeight: rowCol.kind === "episodes" ? 104 : rowCol.kind === "artists" ? 200 : 220
+                Layout.leftMargin: -page.sideMargin
+                Layout.rightMargin: -page.sideMargin
+                Layout.preferredHeight: rowCol.kind === "episodes" ? 104
+                                      : rowCol.kind === "artists" ? (Theme.mobile ? 168 : 200)
+                                      : (Theme.mobile ? 196 : 220)
                 orientation: ListView.Horizontal
-                spacing: 24
-                leftMargin: 32
-                rightMargin: 32
-                interactive: false
+                spacing: Theme.mobile ? 14 : 24
+                leftMargin: page.sideMargin
+                rightMargin: page.sideMargin
+                // десктоп листает стрелками и Shift+колесом; телефон — свайпом
+                interactive: Theme.mobile
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.HorizontalFlick
                 clip: true
                 // плитки за краем не создаются, ушедшие за край переиспользуются
                 reuseItems: true
@@ -428,7 +523,7 @@ Page {
                     id: mediaTile
                     MediaTile {
                         readonly property var e: parent ? parent.modelData : ({})
-                        size: 168
+                        size: Theme.mobile ? 144 : 168
                         cover: e.cover ?? ""
                         coverKind: e.kind === "album" || e.kind === "artist" ? e.kind : ""
                         coverArtist: e.kind === "artist" ? (e.title ?? "") : (e.subtitle ?? "").split(", ")[0]
@@ -439,18 +534,25 @@ Page {
                         shape: e.kind === "radio" ? "flower8" : e.kind === "dj" ? "cookie12" : e.kind === "artist" ? "circle" : "softSquare"
                         badge: e.kind === "radio" ? I18n.t("RADIO") : ""
                         placeholderIcon: ({ playlist: "queue_music", album: "album", artist: "person", show: "podcasts", radio: "radio", dj: "graphic_eq" })[e.kind] ?? "album"
-                        showPlay: true
-                        playing: page.isPlaying(e)
+                        showPlay: e.kind !== "upcoming"   // анонс ещё не вышел: играть нечего
+                        playing: e.kind !== "upcoming" && page.isPlaying(e)
                         onClicked: page.openEntry(e)
                         onPlayClicked: page.playEntry(e)
                         onMenuRequested: p => page.showMenu(e, p)
+                        onHoveredChanged: {
+                            if (e.kind !== "playlist")
+                                return
+                            const props = { playlistId: e.id, playlistTitle: e.title ?? "", cover: e.cover ?? "" }
+                            hovered ? router.prewarmHover("playlist", props)
+                                    : router.prewarmHoverCancel("playlist", props)
+                        }
                     }
                 }
                 Component {
                     id: artistTile
                     MediaTile {
                         readonly property var a: parent ? parent.modelData : ({})
-                        size: 148
+                        size: Theme.mobile ? 120 : 148
                         round: true
                         cover: a.cover ?? ""
                         coverKind: "artist"

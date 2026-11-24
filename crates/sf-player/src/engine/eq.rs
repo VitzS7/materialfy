@@ -8,7 +8,9 @@
 //! This stage does not clip boosted samples. `vis::Tapped` limits the signal
 //! later, after accounting for output volume.
 
-use std::sync::{Arc, Mutex};
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use librespot_playback::{NUM_CHANNELS, SAMPLE_RATE};
 
@@ -333,11 +335,74 @@ pub const PRESETS: &[Preset] = &[
     },
 ];
 
-/// The settings as the window and the player's thread share them.
-pub type SharedEq = Arc<Mutex<EqSettings>>;
+/// Общие настройки: окно EQ и поток плеера.
+///
+/// Плеер не берёт блокировку на каждый пакет (их ~100–250 в секунду даже при выключенном
+/// эквалайзере): писатель через guard поднимает версию, а поток плеера видит это одной
+/// Relaxed-загрузкой и только тогда перечитывает и пересобирает фильтры.
+#[derive(Debug)]
+pub struct EqShared {
+    settings: Mutex<EqSettings>,
+    /// Растёт при каждой записи через `lock()` с мутацией.
+    version: AtomicU64,
+}
+
+pub type SharedEq = Arc<EqShared>;
 
 pub fn shared() -> SharedEq {
-    Arc::new(Mutex::new(EqSettings::default()))
+    Arc::new(EqShared {
+        settings: Mutex::new(EqSettings::default()),
+        version: AtomicU64::new(0),
+    })
+}
+
+impl EqShared {
+    /// Доступ к настройкам. Мутация через `DerefMut` помечает guard, и при его сбросе
+    /// версия растёт — даже если записали те же значения (лишний пересчёт дешевле пропуска).
+    pub fn lock(&self) -> EqGuard<'_> {
+        EqGuard {
+            settings: self.settings.lock().unwrap_or_else(|p| p.into_inner()),
+            version: &self.version,
+            changed: false,
+        }
+    }
+
+    fn clamped(&self) -> EqSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clamped()
+    }
+}
+
+/// Guard из `EqShared::lock()`: мутация через него поднимает версию настроек.
+pub struct EqGuard<'a> {
+    settings: MutexGuard<'a, EqSettings>,
+    version: &'a AtomicU64,
+    changed: bool,
+}
+
+impl Deref for EqGuard<'_> {
+    type Target = EqSettings;
+
+    fn deref(&self) -> &EqSettings {
+        &self.settings
+    }
+}
+
+impl DerefMut for EqGuard<'_> {
+    fn deref_mut(&mut self) -> &mut EqSettings {
+        self.changed = true;
+        &mut self.settings
+    }
+}
+
+impl Drop for EqGuard<'_> {
+    fn drop(&mut self) {
+        if self.changed {
+            self.version.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A second-order section in direct form I, one per band and channel.
@@ -407,6 +472,8 @@ impl Biquad {
 pub struct Processor {
     shared: SharedEq,
     applied: EqSettings,
+    /// Версия настроек, при которой `applied` ещё актуален.
+    version: u64,
     /// One chain per channel; a band at flat is left out of the chain.
     chains: Vec<Vec<Biquad>>,
     gain: f64,
@@ -414,9 +481,14 @@ pub struct Processor {
 
 impl Processor {
     pub fn new(shared: SharedEq) -> Self {
+        // сначала версия, потом настройки: запись между ними оставит версию позади,
+        // и первый же пакет перечитает (обратный порядок пропустил бы изменение)
+        let version = shared.version.load(Ordering::Relaxed);
+        let applied = shared.clamped();
         let mut processor = Self {
             shared,
-            applied: EqSettings::default(),
+            applied,
+            version,
             chains: vec![Vec::new(); NUM_CHANNELS as usize],
             gain: 1.0,
         };
@@ -440,17 +512,24 @@ impl Processor {
         }
     }
 
-    /// Runs interleaved stereo samples through the equalizer, in place.
-    pub fn process(&mut self, samples: &mut [f64]) {
-        let wanted = self
-            .shared
-            .lock()
-            .map(|settings| settings.clamped())
-            .unwrap_or(self.applied);
+    /// Перечитывает настройки, только если их версия изменилась: в горячем пути —
+    /// одна Relaxed-загрузка на пакет вместо блокировки и копии.
+    fn sync(&mut self) {
+        let version = self.shared.version.load(Ordering::Relaxed);
+        if version == self.version {
+            return;
+        }
+        let wanted = self.shared.clamped();
         if wanted != self.applied {
             self.applied = wanted;
             self.rebuild();
         }
+        self.version = version;
+    }
+
+    /// Runs interleaved stereo samples through the equalizer, in place.
+    pub fn process(&mut self, samples: &mut [f64]) {
+        self.sync();
         let shaping = self.applied.on && !(self.chains[0].is_empty() && self.gain == 1.0);
         let gains = self.applied.channel_gains();
         let placing = self.applied.mono || gains != [1.0, 1.0];
@@ -506,8 +585,8 @@ mod tests {
     #[test]
     fn a_boosted_band_makes_its_tone_louder_and_leaves_others_alone() {
         let shared = shared();
-        shared.lock().unwrap().on = true;
-        shared.lock().unwrap().bands_db[4] = 12.0; // 1 kHz
+        shared.lock().on = true;
+        shared.lock().bands_db[4] = 12.0; // 1 kHz
         let mut processor = Processor::new(shared);
         let mut at_band = tone(1000.0, 8192);
         let before = rms(&at_band[4096..]);
@@ -533,18 +612,18 @@ mod tests {
         processor.process(&mut samples);
         assert_eq!(samples, original);
 
-        shared.lock().unwrap().on = true;
+        shared.lock().on = true;
         let mut samples = original.clone();
         processor.process(&mut samples);
         assert_eq!(samples, original);
 
-        shared.lock().unwrap().preamp_db = 6.0;
+        shared.lock().preamp_db = 6.0;
         let mut samples = original.clone();
         processor.process(&mut samples);
         let ratio = rms(&samples) / rms(&original);
         assert!((20.0 * ratio.log10() - 6.0).abs() < 0.1);
 
-        shared.lock().unwrap().preamp_db = -6.0;
+        shared.lock().preamp_db = -6.0;
         let mut samples = original.clone();
         processor.process(&mut samples);
         let ratio = rms(&samples) / rms(&original);
@@ -573,12 +652,12 @@ mod tests {
         let shared = shared();
         let mut processor = Processor::new(shared.clone());
         let mut samples = vec![0.5, -0.25, 0.5, -0.25];
-        shared.lock().unwrap().balance = 0.5;
+        shared.lock().balance = 0.5;
         processor.process(&mut samples);
         assert_eq!(samples, vec![0.25, -0.25, 0.25, -0.25]);
 
-        shared.lock().unwrap().balance = 0.0;
-        shared.lock().unwrap().mono = true;
+        shared.lock().balance = 0.0;
+        shared.lock().mono = true;
         let mut samples = vec![0.5, -0.25];
         processor.process(&mut samples);
         assert_eq!(samples, vec![0.125, 0.125]);

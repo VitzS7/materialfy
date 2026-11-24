@@ -33,8 +33,13 @@ fn main() {
         println!("cargo::rustc-env=MATERIALFY_COMMIT={short}");
     }
 
-    // winframe.cpp и taskbar.cpp собираются везде (вне Windows — заглушка), чтобы привязки в qt/ffi.rs не зависели от ОС
-    let cpp = ["cpp/mf_shell.cpp", "cpp/register.cpp", "cpp/taskbar.cpp", "cpp/winframe.cpp"];
+    // winframe.cpp, taskbar.cpp и floating.cpp собираются везде (вне Windows — заглушка), чтобы привязки
+    // в qt/ffi.rs и winframe.rs не зависели от ОС
+    let mut cpp = vec!["cpp/mf_shell.cpp", "cpp/register.cpp", "cpp/taskbar.cpp", "cpp/winframe.cpp", "cpp/floating.cpp", "cpp/mobile.cpp"];
+    // островок над строкой меню и вырез экрана — AppKit
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        cpp.push("cpp/floating_mac.mm");
+    }
 
     // Без QmlModule: он требует, чтобы все мосты лежали в одном каталоге (QTBUG-93443);
     // типы Materialfy.Core регистрирует cpp/register.cpp.
@@ -46,7 +51,9 @@ fn main() {
         .qt_module("Widgets")
         .include_dir("cpp")
         .files(bridges)
-        .cpp_files(cpp);
+        .cpp_files(cpp)
+        // QObject MobileShell — через moc
+        .cpp_file("cpp/mobile.h");
     let builder = unsafe {
         builder.cc_builder(|cc| {
             cc.include("cpp");
@@ -103,9 +110,23 @@ END
             // taskbar.cpp: ITaskbarList3 (COM), тема панели задач из реестра
             println!("cargo::rustc-link-lib=ole32");
             println!("cargo::rustc-link-lib=advapi32");
+            // floating.cpp: границы кнопок панели задач — UI Automation (COM, BSTR)
+            println!("cargo::rustc-link-lib=oleaut32");
         }
-        // dlsym (display.rs: QWindowSystemInterface::handlePrimaryScreenChanged)
-        Ok("linux") => println!("cargo::rustc-link-lib=dl"),
+        Ok("linux") => {
+            // dlsym (display.rs: QWindowSystemInterface::handlePrimaryScreenChanged)
+            println!("cargo::rustc-link-lib=dl");
+            // floating.cpp: клавиши островка на X11 (XGrabKey)
+            println!("cargo::rustc-link-lib=xcb");
+        }
+        // Android: библиотека, которую грузит QtActivity (main ищется через dlsym), — общий объект, а не исполняемый
+        Ok("android") => {
+            println!("cargo::rustc-link-lib=dl");
+            println!("cargo::rustc-link-lib=log");
+            println!("cargo::rustc-link-arg-bins=-shared");
+            println!("cargo::rustc-link-arg-bins=-Wl,-soname,libmaterialfy_arm64-v8a.so");
+        }
+        Ok("macos") => println!("cargo::rustc-link-lib=framework=AppKit"),
         _ => {}
     }
 }

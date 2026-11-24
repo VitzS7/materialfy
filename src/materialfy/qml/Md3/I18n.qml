@@ -2,22 +2,32 @@ pragma Singleton
 import QtQml
 import Materialfy.Core
 
-// Localisation for QML. Source strings are English; the Russian dictionary comes from Rust (Translations.ru,
-// built from i18n/ru/*.json). Every function reads Translations.language, so a binding that calls I18n.t(...) re-evaluates
-// when the language changes (Settings.language → Translations.language).
-//   I18n.t("Play")                          → "Play" / "Играть"
+// Localisation for QML. Source strings are English; the Russian and Portuguese dictionaries come from Rust
+// (Translations.ru / Translations.pt, built from i18n/ru/*.json and i18n/pt/*.json). Every function reads
+// Translations.language, so a binding that calls I18n.t(...) re-evaluates when the language changes
+// (Settings.language → Translations.language).
+//   I18n.t("Play")                          → "Play" / "Играть" / "Reproduzir"
 //   I18n.t("{0} of {1}", a, b)              → positional placeholders
-//   I18n.n(count, "{0} track", "{0} tracks") → "5 tracks" / "5 треков" (dictionary key "{0} track|{0} tracks")
+//   I18n.n(count, "{0} track", "{0} tracks") → "5 tracks" / "5 треков" / "5 faixas" (key "{0} track|{0} tracks")
 // Formatting helpers (compact numbers, dates, durations, sizes) keep their locale data in _loc below.
 QtObject {
     id: root
 
-    // "en" | "ru"
-    readonly property string lang: Translations.language === "ru" ? "ru" : "en"
+    // "en" | "ru" | "pt"
+    readonly property string lang: {
+        const code = Translations.language
+        return code === "ru" || code === "pt" ? code : "en"
+    }
     readonly property bool russian: lang === "ru"
-    // the Russian dictionary (constant: converted to a JS object once)
+    // the embedded dictionaries (constant: converted to JS objects once)
     readonly property var _ru: Translations.ru
-    readonly property var dict: russian ? _ru : ({})
+    readonly property var _pt: Translations.pt
+    readonly property var dict: _dictOf(lang) || ({})
+
+    // The dictionary of a language code (undefined for English, which uses the source strings).
+    function _dictOf(code) {
+        return code === "ru" ? _ru : code === "pt" ? _pt : undefined
+    }
 
     // Functions read Translations.language directly (not the `lang` binding), so they are current even inside a
     // languageChanged handler that runs before I18n's own bindings update.
@@ -25,7 +35,8 @@ QtObject {
         return Translations.language === "ru"
     }
     function _cur() {
-        return _loc[_isRu() ? "ru" : "en"]
+        const code = Translations.language
+        return _loc[code === "ru" || code === "pt" ? code : "en"]
     }
 
     // Substitutes {0}, {1}… with args[0], args[1]… (missing arguments leave the placeholder as is).
@@ -36,25 +47,69 @@ QtObject {
     }
 
     // Translation of an English source string; extra arguments substitute {0}, {1}…
+    // Фразы, где автозамена «компьютер → телефон» даёт «телефон виден на телефоне»: на телефоне — свой текст
+    // (английский здесь, переводы — ключи "phone:<английский>" в словарях)
+    readonly property var _phoneEn: ({
+        "How this computer appears on phones and speakers": "How this phone appears on other devices and speakers",
+        "How this computer appears in Spotify on your phone and other devices": "How this phone appears in Spotify on your other devices",
+        "Materialfy becomes a Spotify Connect device: music plays here, and your phone sees this computer in its device list. Confirm in your browser; after that your library also goes through this sign-in, with no Web API limits.":
+            "Materialfy becomes a Spotify Connect device: music plays here, and your computer and speakers see this phone in their device lists. Confirm in your browser; after that your library also goes through this sign-in, with no Web API limits.",
+        "Remote: move music between your phone and computer": "Remote: move music between this phone, a computer and speakers",
+        "Without Premium you can sign in another way — through the Web API: you get your library, search and a remote for phones and speakers, but no music on this computer. Spotify sometimes limits these requests.":
+            "Without Premium you can sign in another way — through the Web API: you get your library, search and a remote for other devices and speakers, but no music on this phone. Spotify sometimes limits these requests.",
+        "Open Spotify on a phone or speaker and it will show up here. Or start playing music on this computer.":
+            "Open Spotify on a computer or speaker and it will show up here. Or start playing music on this phone.",
+        "The playing track’s cover, blurred behind the whole window as a soft colored glow":
+            "The playing track’s cover, blurred behind the whole screen as a soft colored glow"
+    })
+
     function t(en) {
-        const s = _isRu() ? _ru[en] : undefined
-        const pattern = typeof s === "string" ? s : en
+        const d = _dictOf(Translations.language)
+        if (Theme.mobile && _phoneEn[en] !== undefined) {
+            const ps = d ? d["phone:" + en] : undefined
+            const pp = typeof ps === "string" ? ps : _phoneEn[en]
+            return arguments.length > 1 ? format(pp, Array.prototype.slice.call(arguments, 1)) : pp
+        }
+        const s = d ? d[en] : undefined
+        const pattern = phone(typeof s === "string" ? s : en)
         return arguments.length > 1 ? format(pattern, Array.prototype.slice.call(arguments, 1)) : pattern
     }
 
-    // Russian → English for plain (non-plural) entries, built once.
+    // Phone layout (Theme.mobile): the interface speaks of "this phone", not "this computer". The nouns decline
+    // alike (компьютер-а/-е/-ом → телефон-а/-е/-ом; computador(es) → celular(es)), so one replacement per stem
+    // covers every dictionary entry. mf_i18n::set_phone does the same for strings coming from Rust.
+    function phone(text) {
+        if (!Theme.mobile || typeof text !== "string" || text.length === 0)
+            return text
+        switch (Translations.language) {
+        case "ru":
+            return text.replace(/компьютер/g, "телефон").replace(/Компьютер/g, "Телефон")
+        case "pt":
+            return text.replace(/computadores/g, "celulares").replace(/computador/g, "celular")
+                       .replace(/Computadores/g, "Celulares").replace(/Computador/g, "Celular")
+        default:
+            return text.replace(/\bcomputers\b/g, "phones").replace(/\bcomputer\b/g, "phone")
+                       .replace(/\bComputer\b/g, "Phone")
+        }
+    }
+
+    // Any language → English for plain (non-plural) entries, built once from every dictionary.
     readonly property var _en: {
         const back = {}
-        for (const k in _ru) {
-            const v = _ru[k]
-            if (typeof v === "string" && k.indexOf("|") < 0 && !(v in back))
-                back[v] = k
+        const add = d => {
+            for (const k in d) {
+                const v = d[k]
+                if (typeof v === "string" && k.indexOf("|") < 0 && !(v in back))
+                    back[v] = k
+            }
         }
+        add(_ru)
+        add(_pt)
         return back
     }
 
-    // Text that Rust produced (and may have cached) in either language, shown in the current one:
-    // a Russian dictionary value maps back to its English source first, then translates as usual.
+    // Text that Rust produced (and may have cached) in any language, shown in the current one:
+    // a dictionary value maps back to its English source first, then translates as usual.
     function any(text) {
         const s = String(text ?? "")
         const en = typeof _en[s] === "string" ? _en[s] : s
@@ -68,13 +123,21 @@ QtObject {
         return m10 === 1 && m100 !== 11 ? 0 : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? 1 : 2
     }
 
+    // Plural category of the current language: Russian three forms, the others one (1) / many.
+    function _pluralIndex(count) {
+        if (Translations.language === "ru")
+            return _ruIndex(count)
+        return Math.abs(Math.trunc(Number(count) || 0)) === 1 ? 0 : 1
+    }
+
     // Plural form for count; {0} → count (shown = what replaces {0}, e.g. a compact number).
     function _plural(count, one, many, shown) {
-        const forms = _isRu() ? _ru[one + "|" + many] : undefined
+        const d = _dictOf(Translations.language)
+        const forms = d ? d[one + "|" + many] : undefined
         let form
         if (typeof forms === "string") {
             const list = String(forms).split("|")
-            form = list[Math.min(_ruIndex(count), list.length - 1)]
+            form = list[Math.min(_pluralIndex(count), list.length - 1)]
         } else {
             form = Number(count) === 1 ? one : many
         }
@@ -142,6 +205,30 @@ QtObject {
             min: "{0} мин",
             sec: "{0} с",
             bytes: ["Б", "КБ", "МБ", "ГБ"]
+        },
+        pt: {
+            decimal: ",",
+            group: ".",
+            million: " mi",
+            thousand: " mil",
+            monthsShort: ["jan.", "fev.", "mar.", "abr.", "mai.", "jun.", "jul.", "ago.", "set.", "out.", "nov.", "dez."],
+            // lowercase, as in «9 de outubro de 2024»
+            monthsLong: ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro",
+                         "outubro", "novembro", "dezembro"],
+            dayMonth: "{0} de {1}",
+            date: "{0} de {1} de {2}",
+            monthYear: "{0} de {1}",
+            now: "Agora mesmo",
+            minAgo: "{0} min atrás",
+            hrAgo: "{0} h atrás",
+            yesterday: "Ontem",
+            daysAgo: ["{0} dia atrás", "{0} dias atrás"],
+            lastWeek: "Semana passada",
+            weeksAgo: ["{0} semana atrás", "{0} semanas atrás"],
+            hr: "{0} h",
+            min: "{0} min",
+            sec: "{0} s",
+            bytes: ["B", "KB", "MB", "GB"]
         }
     })
     readonly property var loc: _loc[lang]   // for bindings; functions use _cur()

@@ -22,7 +22,7 @@ use crate::data::liked::{self, LikedSongs};
 use crate::data::paged::PagedList;
 use crate::data::text::list_change;
 use crate::data::collection_session::{self, LikedFeed};
-use crate::data::{known, playlist_cache, playlist_session, podcast_session, route};
+use crate::data::{known, library_cache, playlist_cache, playlist_session, podcast_session, route};
 use sf_player::engine::session_playlists::Change;
 use crate::history::HistoryService;
 use crate::lock;
@@ -121,6 +121,8 @@ struct PlaylistPage {
     snapshot: String,
     complete: bool,
     loading: bool,
+    /// идущее чтение: отменяется закрытием экрана или явным обновлением (записи это не трогает)
+    read: Option<tokio::task::AbortHandle>,
     pending_writes: usize,
     /// после записи перечитать (ошибка или чтение во время записи)
     reload_after_write: bool,
@@ -134,6 +136,63 @@ const SNAPSHOT_RECHECKS: [std::time::Duration; 3] = [
     std::time::Duration::from_secs(3),
     std::time::Duration::from_secs(6),
 ];
+
+/// Что делать при открытии плейлиста (записи уже нет: её проверяет вызывающий).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenAction {
+    /// кэш уже на месте и показан в модели — ни Reset, ни перечитывания
+    Idle,
+    /// чтение уже идёт: не дублируем его и не сбрасываем модель, новому экрану остаётся Loading(true)
+    Loading,
+    /// перечитать
+    Fetch,
+}
+
+impl PlaylistPage {
+    /// Шапка этого экрана уже сверена со snapshot: страница не может устареть незаметно.
+    fn header_confirmed(&self) -> bool {
+        self.header.as_ref().is_some_and(|h| {
+            let snapshot = h.snapshot_id.clone().unwrap_or_default();
+            !snapshot.is_empty() && snapshot == self.snapshot
+        })
+    }
+
+    fn open_action(&self, force: bool) -> OpenAction {
+        if self.loading {
+            return if force { OpenAction::Fetch } else { OpenAction::Loading };
+        }
+        if !force && self.complete && !self.reload_after_write && self.header_confirmed() {
+            OpenAction::Idle
+        } else {
+            OpenAction::Fetch
+        }
+    }
+}
+
+/// Тот же аккаунт и то же поколение страницы: ответ чтения ещё «свой».
+fn same_read(state: &State, id: &PlaylistId, generation: u64, page_generation: u64) -> bool {
+    state.generation == generation
+        && state.pages.get(id).is_some_and(|page| page.generation == page_generation)
+}
+
+/// То же, и записи не начались: их оптимистичные строки перечитывание не трогает.
+fn read_is_current(state: &State, id: &PlaylistId, generation: u64, page_generation: u64) -> bool {
+    same_read(state, id, generation, page_generation)
+        && state.pages.get(id).is_some_and(|page| page.pending_writes == 0)
+}
+
+/// Кэш плейлиста и его перезаливка в модель уходят кусками: первый — Reset, дальше — Append.
+/// Один гигантский Reset не готовится и не применяется целиком; порядок и повторы строк сохраняются.
+fn cached_events(id: &PlaylistId, rows: &[TrackItem]) -> Vec<LibraryEvent> {
+    rows.chunks(CHUNK)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let change =
+                if i == 0 { ListChange::Reset(chunk.to_vec()) } else { ListChange::Append(chunk.to_vec()) };
+            LibraryEvent::PlaylistTracks { id: id.clone(), change }
+        })
+        .collect()
+}
 
 #[derive(Default)]
 struct State {
@@ -316,6 +375,43 @@ fn folder_tree(rootlist: &Rootlist) -> (Vec<String>, HashMap<String, Folder>) {
     (root, folders)
 }
 
+/// Сводка «последнее добавленное/обновлённое» из строк всех разделов: без папок, новые сверху.
+fn merge_recent(mut all: Vec<LibraryEntry>, limit: usize, pins: &[String]) -> Vec<LibraryEntry> {
+    all.retain(|entry| entry.kind != "folder");
+    // «последнее касание»: у плейлиста это добавление, у исполнителя — прослушивание
+    let touched = |entry: &LibraryEntry| entry.added_at.clone().max(entry.played_at.clone());
+    // закреплённые — первыми в порядке закрепления: поле строки есть у всех сразу, порядок задаёт только список
+    let pin_rank = |entry: &LibraryEntry| {
+        pins.iter()
+            .position(|uri| *uri == entry.uri)
+            .map_or(if entry.pinned { 0 } else { usize::MAX }, |rank| rank + 1)
+    };
+    all.sort_by_cached_key(|entry| (pin_rank(entry), std::cmp::Reverse(touched(entry))));
+    // у плейлистов не бывает added_at, поэтому они всегда последние и могли выпасть из обрезки целиком:
+    // сперва берём закреплённые и самую свежую строку каждого вида, остальное добираем по времени
+    let mut picked: Vec<LibraryEntry> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut kinds = HashSet::new();
+    for entry in &all {
+        if picked.len() >= limit {
+            break;
+        }
+        let head = kinds.insert(entry.kind.clone());
+        if (pin_rank(entry) != usize::MAX || head) && seen.insert(entry.uri.clone()) {
+            picked.push(entry.clone());
+        }
+    }
+    for entry in &all {
+        if picked.len() >= limit {
+            break;
+        }
+        if seen.insert(entry.uri.clone()) {
+            picked.push(entry.clone());
+        }
+    }
+    picked
+}
+
 /// Сортировка строк экрана «Библиотека» (закреплённые — первыми в порядке закрепления).
 fn sort_entries(entries: &mut [LibraryEntry], sort: &str, pins: &[String]) {
     let pin_rank = |entry: &LibraryEntry| pins.iter().position(|uri| *uri == entry.uri).unwrap_or(usize::MAX);
@@ -490,12 +586,14 @@ impl State {
         if item.track_count > 0 {
             subtitle.push_str(&format!(" · {}", mf_i18n::n(item.track_count, "{0} track", "{0} tracks")));
         }
+        // DJ — не плейлист: у него нет списка треков, он только запускается (как кнопка)
+        let dj = item.uri == crate::data::home_feed::DJ_URI;
         LibraryEntry {
-            kind: "playlist".to_owned(),
+            kind: if dj { "dj".to_owned() } else { "playlist".to_owned() },
             id: item.playlist_id.clone(),
             uri: item.uri.clone(),
-            title: item.title.clone(),
-            subtitle,
+            title: if dj { "DJ".to_owned() } else { item.title.clone() },
+            subtitle: if dj { mf_i18n::t("Music and commentary picked for you").to_owned() } else { subtitle },
             cover: item.cover.clone(),
             covers: if item.cover.is_empty() { Vec::new() } else { vec![item.cover.clone()] },
             owner: item.owner.clone(),
@@ -643,7 +741,9 @@ impl LibraryService {
                             service.reload_with_session();
                             let wanted = {
                                 let state = lock(&service.state);
-                                state.account.is_some() && state.rootlist.is_none() && !state.rootlist_loading
+                                // список с диска (library_cache) — тоже повод: свежий rootlist заменит его
+                                state.account.is_some() && (state.rootlist.is_none() || !state.session_list)
+                                    && !state.rootlist_loading
                             };
                             if wanted {
                                 service.load_rootlist();
@@ -748,6 +848,7 @@ impl LibraryService {
         };
         self.send(events);
         if account.is_some() {
+            self.hydrate_from_cache();
             self.load_all(false);
         }
     }
@@ -804,7 +905,8 @@ impl LibraryService {
         let ids: Vec<PlaylistId> = lock(&self.state).pages.keys().cloned().collect();
         if force {
             for id in ids {
-                self.load_playlist(id);
+                // явное обновление: идущие чтения перезапускаются, готовый кэш перечитывается
+                self.refresh_playlist(id);
             }
         }
     }
@@ -883,6 +985,7 @@ impl LibraryService {
                 let Some(offset) = lock(&service.state).liked.request_offset() else { break };
                 if !feed_opened {
                     feed_opened = true;
+                    route::wait_account_session(&service.auth.api(), &service.player, route::STARTUP_SESSION_WAIT).await;
                     feed = LikedFeed::open(&service.auth.api(), &service.player).await;
                     if feed.is_none() && route::account_session(&service.auth.api(), &service.player).is_none() {
                         let mut state = lock(&service.state);
@@ -1205,7 +1308,7 @@ impl LibraryService {
     /// Принять список из rootlist: чего у сессии нет (имя владельца, коллаж), берётся из прежних шапок;
     /// затем коллажи для плейлистов без своей обложки.
     fn adopt_library(&self, library: playlist_session::Library, generation: u64) {
-        let (events, coverless) = {
+        let (events, coverless, cached) = {
             let mut state = lock(&self.state);
             if state.generation != generation {
                 return;
@@ -1220,6 +1323,11 @@ impl LibraryService {
             let coverless: Vec<String> =
                 raw.iter().filter(|pl| pl.images.is_empty() && pl.track_total() > 0).map(|pl| pl.id.clone()).collect();
             state.playlists_raw = raw;
+            // дерево уходит на диск: когда сессия в следующий раз будет подниматься, библиотека уже видна
+            let cached = library_cache::CachedLibrary::new(
+                library.rootlist.entries.clone(),
+                state.playlists_raw.clone(),
+            );
             state.rootlist = Some(library.rootlist);
             state.rootlist_loading = false;
             state.session_list = true;
@@ -1232,12 +1340,55 @@ impl LibraryService {
             events.extend([LibraryEvent::EntriesChanged, LibraryEvent::SavedChanged]);
             let ids: Vec<PlaylistId> = state.pages.keys().cloned().collect();
             events.extend(ids.into_iter().map(LibraryEvent::PlaylistInfo));
-            (events, coverless)
+            (events, coverless, cached)
         };
         self.send(events);
         if !coverless.is_empty() {
             self.spawn(move |service| async move { service.fill_mosaics(coverless, generation).await });
         }
+        self.spawn(move |service| async move {
+            let Some(account) = lock(&service.state).account.clone() else { return };
+            let file = library_cache::path(&mf_platform::dirs::playlist_cache_dir(&account));
+            let _ = tokio::task::spawn_blocking(move || library_cache::write(&file, &cached)).await;
+        });
+    }
+
+    /// Пока сессия поднимается (это может занять десятки секунд), показать дерево плейлистов с диска.
+    /// Свежий rootlist из сессии придёт позже и заменит его.
+    fn hydrate_from_cache(&self) {
+        let (account, generation) = {
+            let state = lock(&self.state);
+            let Some(account) = state.account.clone() else { return };
+            if state.rootlist.is_some() {
+                return;
+            }
+            (account, state.generation)
+        };
+        let file = library_cache::path(&mf_platform::dirs::playlist_cache_dir(&account));
+        self.spawn(move |service| async move {
+            let cached = tokio::task::spawn_blocking(move || library_cache::read(&file)).await.ok().flatten();
+            let Some(cached) = cached else { return };
+            service.adopt_cached(cached, generation);
+        });
+    }
+
+    /// Принять кэш как список из сессии: те же события, дерево без прав на добавление (их даёт сессия).
+    fn adopt_cached(&self, cached: library_cache::CachedLibrary, generation: u64) {
+        let events = {
+            let mut state = lock(&self.state);
+            // сессия успела ответить первой — её список свежее кэша
+            if state.generation != generation || state.rootlist.is_some() {
+                return;
+            }
+            let playlists = cached.playlists;
+            self.auth.api().observe_playlists(playlists.iter());
+            state.playlists_raw = playlists;
+            state.rootlist = Some(Rootlist { entries: cached.rootlist, ..Default::default() });
+            let mut events: Vec<LibraryEvent> = state.rebuild_playlists().into_iter().collect();
+            events.push(LibraryEvent::EntriesChanged);
+            events
+        };
+        self.send(events);
     }
 
     /// Коллажи обложек (как у Web API) для плейлистов без своей обложки — через сессию.
@@ -1329,31 +1480,98 @@ impl LibraryService {
         lock(&self.state).playlists_loading
     }
 
-    /// Загрузить/обновить треки плейлиста (сессия librespot для чужих, Web API для своих) → PlaylistTracks.
+    /// Открыть плейлист (сессия librespot для чужих, Web API для своих) → PlaylistTracks.
+    /// Без дублей: чтение уже идёт — не перезапускается; кэш уже показан — ни Reset, ни сети.
     pub fn load_playlist(&self, id: PlaylistId) {
-        let (generation, page_generation, rows, cached_needed, account) = {
+        self.open_playlist(id, false);
+    }
+
+    /// Явное обновление (кнопка «Обновить», перечитывание после правок): идущее чтение отменяется.
+    pub fn refresh_playlist(&self, id: PlaylistId) {
+        self.open_playlist(id, true);
+    }
+
+    fn open_playlist(&self, id: PlaylistId, force: bool) {
+        let (generation, page_generation, cached_needed, account, action) = {
             let mut state = lock(&self.state);
             let Some(account) = state.account.clone() else { return };
             let generation = state.generation;
             let page = state.pages.entry(id.clone()).or_default();
             if page.pending_writes > 0 {
                 page.reload_after_write = true;
-                let rows = page.rows.clone();
-                drop(state);
-                self.send([LibraryEvent::PlaylistTracks { id, change: ListChange::Reset(rows) }]);
                 return;
             }
-            page.generation += 1;
-            page.loading = true;
-            (generation, page.generation, page.rows.clone(), page.rows.is_empty(), account)
+            let action = page.open_action(force);
+            if action == OpenAction::Fetch {
+                if let Some(read) = page.read.take() {
+                    read.abort();
+                }
+                page.generation += 1;
+                page.loading = true;
+            }
+            (generation, page.generation, page.rows.is_empty(), account, action)
         };
-        self.send([
-            LibraryEvent::PlaylistTracks { id: id.clone(), change: ListChange::Reset(rows) },
-            LibraryEvent::PlaylistTracks { id: id.clone(), change: ListChange::Loading(true) },
-        ]);
-        self.spawn(move |service| async move {
-            service.fetch_playlist(id, generation, page_generation, cached_needed, account).await;
+        // новому экрану (и модели, созданной позже чтения) нужно видеть, что чтение идёт; при Idle
+        // чтения нет — погасить зависший loading, если он остался от пропущенных событий
+        let loading = action != OpenAction::Idle;
+        self.send([LibraryEvent::PlaylistTracks { id: id.clone(), change: ListChange::Loading(loading) }]);
+        if action == OpenAction::Loading {
+            return;
+        }
+        let me = self.me.clone();
+        let task_id = id.clone();
+        let read = self.rt.spawn(async move {
+            if let Some(service) = me.upgrade() {
+                service.fetch_playlist(task_id, generation, page_generation, cached_needed, account).await;
+            }
         });
+        // чтение запоминается под своей генерацией: заменить его может только более новое
+        let mut state = lock(&self.state);
+        if let Some(page) = state.pages.get_mut(&id)
+            && page.generation == page_generation
+        {
+            page.read = Some(read.abort_handle());
+        } else {
+            drop(state);
+            read.abort();
+        }
+    }
+
+    /// Экран закрылся: отменить чтение, которое больше никому не нужно (записи и воспроизведение не трогает).
+    pub fn cancel_playlist(&self, id: &PlaylistId) {
+        let mut state = lock(&self.state);
+        let Some(page) = state.pages.get_mut(id) else { return };
+        if page.pending_writes > 0 {
+            return;
+        }
+        if !page.loading {
+            page.read = None;
+            return;
+        }
+        if let Some(read) = page.read.take() {
+            read.abort();
+        }
+        page.generation += 1;
+        page.loading = false;
+        // loading при complete=true — это явное обновление (force) или перечитывание после правки;
+        // отмена не должна прятать намерение: иначе следующее открытие покажет старый кэш как Idle
+        page.complete = false;
+        let event = LibraryEvent::PlaylistTracks { id: id.clone(), change: ListChange::Loading(false) };
+        drop(state);
+        self.send([event]);
+    }
+
+    /// Модель моста может не видеть готовый кэш сервиса (новый мост, пропущенные события): перезалить
+    /// его кусками. События уходят в очередь под блокировкой состояния — чтение, начавшееся параллельно,
+    /// допишет свои куски после, устаревший Reset не догонит свежие строки.
+    pub fn replay_playlist(&self, id: &PlaylistId) {
+        let state = lock(&self.state);
+        let Some(page) = state.pages.get(id) else { return };
+        if page.rows.is_empty() {
+            return;
+        }
+        let events = cached_events(id, &page.rows);
+        self.send(events);
     }
 
     async fn fetch_playlist(
@@ -1365,10 +1583,10 @@ impl LibraryService {
         account: String,
     ) {
         let service = self;
+        // быстрая проверка перед ожиданием сети; принятие шапок/страниц/финала сверяется ещё раз под тем же блоком
         let still = |service: &Self| {
             let state = lock(&service.state);
-            state.generation == generation
-                && state.pages.get(&id).is_some_and(|page| page.generation == page_generation && page.pending_writes == 0)
+            read_is_current(&state, &id, generation, page_generation)
         };
         let cache_file = playlist_cache::path(&mf_platform::dirs::playlist_cache_dir(&account), id.as_str());
         if cached_needed {
@@ -1379,14 +1597,20 @@ impl LibraryService {
                     return;
                 }
                 known::remember(cached.items.iter());
-                let event = {
+                // кэш уходит кусками (первый Reset, дальше Append), а не одним гигантским Reset
+                {
                     let mut state = lock(&service.state);
+                    if !read_is_current(&state, &id, generation, page_generation) {
+                        return;
+                    }
                     let page = state.pages.entry(id.clone()).or_default();
                     page.rows = cached.items.clone();
                     page.snapshot = cached.snapshot;
-                    LibraryEvent::PlaylistTracks { id: id.clone(), change: ListChange::Reset(cached.items) }
+                    let events = cached_events(&id, &cached.items);
+                    // под той же блокировкой: replay шлёт синхронно под lock — окно между
+                    // unlock и send дало бы дубли поверх свежих строк
+                    service.send(events);
                 };
-                service.send([event]);
             }
         }
         let api = service.auth.api();
@@ -1394,10 +1618,12 @@ impl LibraryService {
             let mut events = Vec::new();
             {
                 let mut state = lock(&service.state);
-                if let Some(page) = state.pages.get_mut(&id)
-                    && page.generation == page_generation
-                {
+                if !read_is_current(&state, &id, generation, page_generation) {
+                    return;
+                }
+                if let Some(page) = state.pages.get_mut(&id) {
                     page.loading = false;
+                    page.read = None;
                 }
             }
             events.push(LibraryEvent::PlaylistTracks { id: id.clone(), change: ListChange::Loading(false) });
@@ -1424,6 +1650,9 @@ impl LibraryService {
             // ответ со snapshot до нашей записи не должен вернуть строки, которые запись уже изменила
             let confirmed = {
                 let mut state = lock(&service.state);
+                if !read_is_current(&state, &id, generation, page_generation) {
+                    return;
+                }
                 let page = state.pages.entry(id.clone()).or_default();
                 match &page.expected_snapshot {
                     Some(expected) if header.snapshot_id.as_deref() != Some(expected.as_str()) => false,
@@ -1450,9 +1679,12 @@ impl LibraryService {
         };
         let snapshot = header.snapshot_id.clone().unwrap_or_default();
         let total = header.track_total();
-        let collaborative = header.collaborative;
+        let collaborative = header.collaborative || header.blend;
         let up_to_date = {
             let mut state = lock(&service.state);
+            if !read_is_current(&state, &id, generation, page_generation) {
+                return;
+            }
             let page = state.pages.entry(id.clone()).or_default();
             page.header = Some(header);
             !snapshot.is_empty() && page.snapshot == snapshot && page.rows.len() == total as usize
@@ -1494,13 +1726,16 @@ impl LibraryService {
                 let change = if rows.is_empty() { ListChange::Reset(added.clone()) } else { ListChange::Append(added.clone()) };
                 {
                     let mut state = lock(&service.state);
+                    if !read_is_current(&state, &id, generation, page_generation) {
+                        return;
+                    }
                     let page = state.pages.entry(id.clone()).or_default();
                     if offset == 0 {
                         page.rows.clear();
                     }
                     page.rows.extend(added.iter().cloned());
+                    service.send([LibraryEvent::PlaylistTracks { id: id.clone(), change }]);
                 }
-                service.send([LibraryEvent::PlaylistTracks { id: id.clone(), change }]);
             }
             rows.extend(added);
             match next {
@@ -1508,16 +1743,21 @@ impl LibraryService {
                 _ => break,
             }
         }
-        let event = {
+        {
             let mut state = lock(&service.state);
+            if !read_is_current(&state, &id, generation, page_generation) {
+                return;
+            }
             let page = state.pages.entry(id.clone()).or_default();
             let change = list_change(&page.rows, &rows);
             page.rows = rows.clone();
             page.snapshot = snapshot.clone();
             page.complete = true;
-            change.map(|change| LibraryEvent::PlaylistTracks { id: id.clone(), change })
+            page.read = None;
+            if let Some(change) = change {
+                service.send([LibraryEvent::PlaylistTracks { id: id.clone(), change }]);
+            }
         };
-        service.send(event);
         service.send([LibraryEvent::PlaylistInfo(id.clone())]);
         service.refresh_mosaic(&id, &rows);
         finish(&service, None);
@@ -1546,6 +1786,12 @@ impl LibraryService {
     /// Строки для оптимистичной вставки: известные или дочитанные из каталога.
     async fn resolve_rows(&self, uris: &[String], hint: Option<&TrackItem>) -> Vec<TrackItem> {
         let mut rows = Vec::with_capacity(uris.len());
+        let unknown: Vec<String> = uris
+            .iter()
+            .filter(|uri| hint.is_none_or(|hint| hint.play_uri() != **uri) && known::get(uri).is_none())
+            .cloned()
+            .collect();
+        let mut from_session = self.session_rows(&unknown).await;
         let mut client = None;
         for uri in uris {
             if let Some(hint) = hint.filter(|hint| hint.play_uri() == *uri) {
@@ -1553,6 +1799,11 @@ impl LibraryService {
                 continue;
             }
             if let Some(row) = known::get(uri) {
+                rows.push(row);
+                continue;
+            }
+            if let Some(row) = from_session.remove(uri) {
+                known::remember([&row]);
                 rows.push(row);
                 continue;
             }
@@ -1570,6 +1821,38 @@ impl LibraryService {
             let row = fetched.unwrap_or_else(|| TrackItem { uri: uri.clone(), available: true, ..Default::default() });
             known::remember([&row]);
             rows.push(row);
+        }
+        rows
+    }
+
+    /// Треки и выпуски по URI одной-двумя пачками метаданных сессии (без квоты Web API); чего нет — пусто.
+    async fn session_rows(&self, uris: &[String]) -> HashMap<String, TrackItem> {
+        let mut rows = HashMap::new();
+        if uris.is_empty() {
+            return rows;
+        }
+        let Some(session) = route::account_session(&self.auth.api(), &self.player) else { return rows };
+        let tracks: Vec<String> = uris.iter().filter(|uri| uri_kind(uri) == "track").cloned().collect();
+        let episodes: Vec<String> = uris.iter().filter(|uri| uri_kind(uri) == "episode").cloned().collect();
+        let read_tracks = async {
+            if tracks.is_empty() {
+                return None;
+            }
+            sf_player::engine::session_collection::tracks(&session, &tracks).await.ok()
+        };
+        let read_episodes = async {
+            if episodes.is_empty() {
+                return None;
+            }
+            sf_player::engine::session_podcasts::episodes(&session, &episodes).await.ok()
+        };
+        let read = async { tokio::join!(read_tracks, read_episodes) };
+        let Ok((tracks, episodes)) = tokio::time::timeout(std::time::Duration::from_secs(15), read).await else { return rows };
+        for (uri, track) in tracks.unwrap_or_default() {
+            rows.insert(uri, map::track_item(&track));
+        }
+        for episode in episodes.unwrap_or_default() {
+            rows.insert(episode.uri.clone(), map::episode_item(&episode, None).to_track());
         }
         rows
     }
@@ -1677,7 +1960,8 @@ impl LibraryService {
             None => {}
         }
         if reload {
-            self.load_playlist(id.clone());
+            // после записи: кэш уже не «актуален» — перечитать принудительно
+            self.refresh_playlist(id.clone());
         }
     }
 
@@ -2410,6 +2694,7 @@ impl LibraryService {
     }
 
     async fn fetch_section(&self, section: Section, generation: u64) -> Result<(), ApiError> {
+        route::wait_account_session(&self.auth.api(), &self.player, route::STARTUP_SESSION_WAIT).await;
         if self.session_section(section, generation).await {
             return Ok(());
         }
@@ -2881,6 +3166,17 @@ impl LibraryService {
         entries
     }
 
+    /// Последние добавленные или обновлённые строки всех разделов — для боковой панели.
+    /// Папки остаются в дереве плейлистов: в «последних» они только мешают.
+    pub fn recent_entries(&self, limit: usize) -> Vec<LibraryEntry> {
+        let mut all = Vec::new();
+        for kind in [LibraryKind::Playlists, LibraryKind::Albums, LibraryKind::Artists, LibraryKind::Shows] {
+            all.extend(self.entries(kind, "all", "added"));
+        }
+        let pins = self.pins();
+        merge_recent(all, limit, &pins)
+    }
+
     pub fn folder_children(&self, folder_id: &str) -> Vec<LibraryEntry> {
         let times = self.history.context_times();
         let state = lock(&self.state);
@@ -3027,6 +3323,30 @@ mod tests {
     }
 
     #[test]
+    fn the_dj_is_a_button_not_a_playlist() {
+        let state = State::default();
+        let times = HashMap::new();
+        let dj = PlaylistItem {
+            playlist_id: "37i9dQZF1EYkqdzj48dyYq".into(),
+            uri: crate::data::home_feed::DJ_URI.into(),
+            title: "DJ".into(),
+            owner: "Spotify".into(),
+            ..Default::default()
+        };
+        let entry = state.playlist_entry(&dj, "", &times);
+        assert_eq!(entry.kind, "dj", "it has no track list, so it only plays");
+        assert_eq!(entry.uri, crate::data::home_feed::DJ_URI);
+
+        let ordinary = PlaylistItem {
+            playlist_id: "p".into(),
+            uri: "spotify:playlist:p".into(),
+            title: "Mine".into(),
+            ..Default::default()
+        };
+        assert_eq!(state.playlist_entry(&ordinary, "", &times).kind, "playlist");
+    }
+
+    #[test]
     fn library_kinds_from_qml_names() {
         assert_eq!(LibraryKind::from_name("podcasts"), LibraryKind::Shows);
         assert_eq!(LibraryKind::from_name("x"), LibraryKind::Playlists);
@@ -3043,6 +3363,65 @@ mod tests {
         sort_entries(&mut entries, "alpha", &["spotify:playlist:c".to_owned()]);
         let titles: Vec<&str> = entries.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["Liked Songs", "В", "А", "Б"]);
+    }
+
+    #[test]
+    fn recent_entries_merge_every_kind_newest_first() {
+        // у плейлиста added_at не бывает — так его и оставляем
+        let playlist = entry("playlist", "playlist", "spotify:playlist:p");
+        let mut album = entry("album", "album", "spotify:album:a");
+        album.added_at = "2026-09-01T00:00:00Z".into();
+        let mut artist = entry("artist", "artist", "spotify:artist:x");
+        artist.played_at = "2026-08-01T00:00:00Z".into();
+        let folder = entry("folder", "folder", "folder:1");
+        let merged = merge_recent(vec![playlist, folder, artist, album], 10, &[]);
+        let titles: Vec<&str> = merged.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["album", "artist", "playlist"], "newest first, folders dropped");
+        assert_eq!(merge_recent(vec![entry("album", "only", "u")], 0, &[]).len(), 0, "limit is honoured");
+        // закреплённое — первым, даже если добавлено давно
+        let mut old = entry("playlist", "pinned", "spotify:playlist:pin");
+        old.added_at = "2020-01-01T00:00:00Z".into();
+        let mut new = entry("album", "fresh", "spotify:album:new");
+        new.added_at = "2026-09-01T00:00:00Z".into();
+        let merged = merge_recent(vec![new, old], 10, &["spotify:playlist:pin".to_owned()]);
+        let titles: Vec<&str> = merged.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["pinned", "fresh"], "pins lead the summary");
+        // два закреплённых — в порядке закрепления, а не по времени (поле pinned у обоих истинно)
+        let mut pin_b = entry("album", "pin b", "spotify:album:b");
+        pin_b.pinned = true;
+        pin_b.added_at = "2026-09-01T00:00:00Z".into();
+        let mut pin_a = entry("album", "pin a", "spotify:album:a");
+        pin_a.pinned = true;
+        pin_a.added_at = "2020-01-01T00:00:00Z".into();
+        let pins = ["spotify:album:a".to_owned(), "spotify:album:b".to_owned()];
+        let merged = merge_recent(vec![pin_b, pin_a], 10, &pins);
+        let titles: Vec<&str> = merged.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["pin a", "pin b"], "pinned rows keep the pin order");
+        // закрепление полем строки («Любимые») тоже ведёт сводку
+        let mut liked = entry("liked", "Liked Songs", "spotify:user:me:collection");
+        liked.pinned = true;
+        let mut fresh = entry("album", "fresh", "spotify:album:fresh");
+        fresh.added_at = "2026-09-01T00:00:00Z".into();
+        let merged = merge_recent(vec![fresh, liked], 10, &[]);
+        let titles: Vec<&str> = merged.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["Liked Songs", "fresh"], "the field leads too");
+    }
+
+    #[test]
+    fn recent_entries_keep_a_playlist_without_added_at() {
+        // у плейлиста added_at пустой: он всегда последний по времени и раньше выпадал из обрезки целиком
+        let mut all = vec![entry("playlist", "playlist", "spotify:playlist:p")];
+        for day in 1..=50 {
+            let mut album = entry("album", &format!("album {day}"), &format!("spotify:album:{day}"));
+            album.added_at = format!("2026-01-01T00:{day:02}:00Z");
+            all.push(album);
+        }
+        let merged = merge_recent(all, 10, &[]);
+        assert_eq!(merged.len(), 10, "limit is honoured");
+        let playlists: Vec<&str> =
+            merged.iter().filter(|e| e.kind == "playlist").map(|e| e.uri.as_str()).collect();
+        assert_eq!(playlists, ["spotify:playlist:p"], "the playlist survives once");
+        assert_eq!(merged[0].title, "album 50", "the bulk stays newest first");
     }
 
     #[test]
@@ -3131,5 +3510,97 @@ mod tests {
         state.saved_intents.insert("spotify:album:x".into(), false);
         assert!(!state.is_saved("spotify:album:x"));
         assert!(remove_saved(&mut state, "spotify:album:missing").is_none());
+    }
+
+    fn page_with(id: &str, complete: bool, loading: bool, reload_after_write: bool) -> (PlaylistId, State) {
+        let id = PlaylistId::from_uri_or_id(id);
+        let mut state = State { account: Some("me".into()), ..Default::default() };
+        let page = state.pages.entry(id.clone()).or_default();
+        page.complete = complete;
+        page.loading = loading;
+        page.reload_after_write = reload_after_write;
+        (id, state)
+    }
+
+    #[test]
+    fn reopening_a_ready_playlist_does_not_refetch_or_reset() {
+        // Без подтверждённой шапки (snapshot не сверялся) готовая страница перечитывается:
+        // дешёвая проверка snapshot ловит изменения с других устройств.
+        let (id, state) = page_with("spotify:playlist:a", true, false, false);
+        assert_eq!(state.pages[&id].open_action(false), OpenAction::Fetch);
+        assert_eq!(state.pages[&id].open_action(true), OpenAction::Fetch);
+
+        // Шапка сверена со snapshot и треки на месте — повторное открытие ничего не делает.
+        let (id, mut state) = page_with("spotify:playlist:a", true, false, false);
+        let page = state.pages.get_mut(&id).unwrap();
+        page.snapshot = "snap".into();
+        page.header = Some(serde_json::from_str(
+            r#"{"id":"a","name":"A","uri":"spotify:playlist:a","snapshot_id":"snap","items":{"total":3},
+                "images":[],"owner":{"id":"me","display_name":"Me"},"public":true}"#,
+        )
+        .unwrap());
+        assert_eq!(state.pages[&id].open_action(false), OpenAction::Idle);
+        assert_eq!(state.pages[&id].open_action(true), OpenAction::Fetch);
+    }
+
+    #[test]
+    fn in_flight_read_is_not_duplicated_but_refresh_restarts_it() {
+        let (id, state) = page_with("spotify:playlist:a", false, true, false);
+        assert_eq!(state.pages[&id].open_action(false), OpenAction::Loading);
+        assert_eq!(state.pages[&id].open_action(true), OpenAction::Fetch);
+        // чтение, помеченное перечитыванием после записи, тоже продолжается
+        let (id, state) = page_with("spotify:playlist:a", false, true, true);
+        assert_eq!(state.pages[&id].open_action(true), OpenAction::Fetch);
+    }
+
+    #[test]
+    fn incomplete_or_reload_marked_pages_refetch() {
+        let (id, state) = page_with("spotify:playlist:a", false, false, false);
+        assert_eq!(state.pages[&id].open_action(false), OpenAction::Fetch);
+        let (id, state) = page_with("spotify:playlist:a", true, false, true);
+        assert_eq!(state.pages[&id].open_action(false), OpenAction::Fetch);
+    }
+
+    #[test]
+    fn stale_generation_or_a_started_write_drops_the_answer() {
+        let (id, mut state) = page_with("spotify:playlist:a", false, true, false);
+        state.generation = 2;
+        assert!(!read_is_current(&state, &id, 1, 1), "смена аккаунта сбрасывает чтение");
+        let (id, mut state) = page_with("spotify:playlist:a", false, true, false);
+        state.pages.get_mut(&id).unwrap().generation = 7;
+        assert!(!read_is_current(&state, &id, 1, 1), "новое чтение страницы сбрасывает старое");
+        let (id, mut state) = page_with("spotify:playlist:a", false, true, false);
+        state.pages.get_mut(&id).unwrap().pending_writes = 1;
+        assert!(!read_is_current(&state, &id, 1, 1), "начавшаяся запись прерывает чтение");
+        let (id, state) = page_with("spotify:playlist:a", false, true, false);
+        assert!(read_is_current(&state, &id, 0, 0));
+        assert!(same_read(&state, &id, 0, 0));
+    }
+
+    #[test]
+    fn cached_rows_arrive_in_order_and_with_repeats() {
+        let id = PlaylistId::from_uri_or_id("spotify:playlist:a");
+        let track = |i: usize| TrackItem { uri: format!("spotify:track:{i}"), ..Default::default() };
+        let mut rows: Vec<TrackItem> = (0..CHUNK + 3).map(track).collect();
+        rows.push(track(0)); // повтор в конце должен дойти до модели
+        rows.insert(1, track(2)); // повтор в начале
+        let events = cached_events(&id, &rows);
+        assert_eq!(events.len(), 2, "по куску CHUNK");
+        let mut delivered: Vec<String> = Vec::new();
+        for event in &events {
+            match event {
+                LibraryEvent::PlaylistTracks { change: ListChange::Reset(chunk), .. } => {
+                    assert!(delivered.is_empty(), "Reset только первым куском");
+                    delivered.extend(chunk.iter().map(|r| r.uri.clone()));
+                }
+                LibraryEvent::PlaylistTracks { change: ListChange::Append(chunk), .. } => {
+                    delivered.extend(chunk.iter().map(|r| r.uri.clone()));
+                }
+                _ => panic!("только Reset/Append"),
+            }
+        }
+        let source: Vec<&str> = rows.iter().map(|r| r.uri.as_str()).collect();
+        assert_eq!(delivered, source, "порядок и повторы сохраняются");
+        assert!(matches!(&events[0], LibraryEvent::PlaylistTracks { change: ListChange::Reset(_), .. }));
     }
 }

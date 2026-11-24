@@ -301,6 +301,9 @@ pub enum PlayerCommand {
     Load(LoadSpec),
     /// Take over the active Connect session, including its queue and position.
     Transfer,
+    /// Fetch the track's audio ahead of time, so starting it does not wait for
+    /// the download (librespot keeps one preloaded track).
+    Preload(String),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -429,6 +432,9 @@ impl Engine {
     ) -> Result<Self> {
         let device_id = config.device_id();
         let session_config = SessionConfig {
+            // client ID — тот, которым выдан OAuth-токен входа (sf_auth). По умолчанию librespot берёт ID по ОС:
+            // на Android — ID клиента Android, и AP отвергает токен чужого клиента (INVALID_CREDENTIALS)
+            client_id: sf_auth::PLAYBACK_CLIENT_ID.to_owned(),
             device_id: device_id.clone(),
             autoplay: Some(config.autoplay),
             proxy,
@@ -441,7 +447,9 @@ impl Engine {
             gapless: config.gapless,
             normalisation: config.normalisation,
             normalisation_type: NormalisationType::Auto,
-            position_update_interval: Some(Duration::from_secs(1)),
+            // 5 Hz: the UI clock interpolates between samples, and a 1 s gap made it
+            // overshoot with the old rate correction (the comment in LyricsView says 5 Hz).
+            position_update_interval: Some(Duration::from_millis(200)),
             // The fork reports each track's normalisation factor here, so
             // the tap can undo it for the visualisers: they show the music,
             // not the loudness housekeeping.
@@ -489,7 +497,8 @@ impl Engine {
 
         let connect_config = ConnectConfig {
             name: config.device_name.clone(),
-            device_type: DeviceType::Computer,
+            // Android: в списке устройств Spotify — телефон, а не компьютер
+            device_type: if cfg!(target_os = "android") { DeviceType::Smartphone } else { DeviceType::Computer },
             initial_volume: config.initial_volume,
             disable_volume: false,
             volume_steps: 64,
@@ -756,11 +765,11 @@ impl Engine {
                 }
             },
             PlayerCommand::Transfer => spirc.transfer(None)?,
+            PlayerCommand::Preload(uri) => self.player.preload(SpotifyUri::from_uri(&uri)?),
             PlayerCommand::Load(spec) => {
-                let playing_track = spec
-                    .offset_uri
-                    .clone()
-                    .map(PlayingTrack::Uri)
+                let playing_track = same_row_uid(&spirc.playback_state().borrow(), &spec)
+                    .map(PlayingTrack::Uid)
+                    .or_else(|| spec.offset_uri.clone().map(PlayingTrack::Uri))
                     .or_else(|| spec.offset_index.map(PlayingTrack::Index));
                 // A load resets librespot's options, including repeat. Pass
                 // the user's preference even when shuffle is off.
@@ -785,6 +794,24 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+/// The playing row's uid when `spec` reloads the playing context from the
+/// playing track with Smart Shuffle's lens switched on or off. Spotify can
+/// give a track another id (relinking) in the other form of the context, so
+/// the uri may be missing there, while the playlist row keeps its uid.
+fn same_row_uid(
+    state: &Option<Arc<librespot_protocol::player::PlayerState>>,
+    spec: &LoadSpec,
+) -> Option<String> {
+    let state = state.as_ref()?;
+    let context = spec.context_uri.as_deref()?;
+    let base = |uri: &str| uri.split('?').next().unwrap_or_default().to_owned();
+    (context != state.context_uri
+        && base(context) == base(&state.context_uri)
+        && spec.offset_uri.as_deref() == Some(state.track.uri.as_str())
+        && !state.track.uid.is_empty())
+    .then(|| state.track.uid.clone())
 }
 
 fn command_interrupts_audio(state: &LocalState, command: &PlayerCommand) -> bool {
@@ -920,7 +947,7 @@ async fn run_events(
     audio: Arc<AudioControl>,
 ) {
     let mut play_request_id = None;
-    while let Some(event) = events.recv().await {
+    while let Some(mut event) = events.recv().await {
         if let PlayerEvent::PlayRequestIdChanged {
             play_request_id: next,
         } = &event
@@ -934,6 +961,8 @@ async fn run_events(
             continue;
         }
         audio.handle_player_event(&event);
+        // The progress bar and the lyrics must follow the sound, not the decoder.
+        pull_back_to_the_ear(&mut event, audio.backlog_ms());
         let snapshot = {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());
             if apply_event(&mut current, event) {
@@ -964,6 +993,22 @@ fn start_replay(state: &mut LocalState) -> bool {
         true
     } else {
         false
+    }
+}
+
+/// librespot reports where the packet it has just read starts, while the sink still holds
+/// hundreds of milliseconds of decoded audio in front of the speaker. Move that packet's
+/// position back by the queue, so everything driven by the position follows the sound.
+/// `Playing` carries the position the stream will start at and can already have audio
+/// queued on a resume; a seek keeps its requested position because its queue is dropped.
+fn pull_back_to_the_ear(event: &mut PlayerEvent, backlog_ms: u32) {
+    match event {
+        PlayerEvent::PositionCorrection { position_ms, .. }
+        | PlayerEvent::PositionChanged { position_ms, .. }
+        | PlayerEvent::Playing { position_ms, .. } => {
+            *position_ms = position_ms.saturating_sub(backlog_ms);
+        }
+        _ => {}
     }
 }
 
@@ -1016,9 +1061,7 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
         }
         PlayerEvent::Seeked { position_ms, .. } => {
             state.position_ms = position_ms;
-            if state.playback == Playback::Playing {
-                state.position_at = Some(Instant::now());
-            }
+            state.position_at = (state.playback == Playback::Playing && !state.narrating).then(Instant::now);
             state.seek_sequence = state.seek_sequence.wrapping_add(1);
             true
         }
@@ -1273,6 +1316,29 @@ fn decode_folder_name(encoded: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn switching_smart_shuffle_finds_the_playing_row_by_uid() {
+        let mut state = librespot_protocol::player::PlayerState {
+            context_uri: "spotify:playlist:p".into(),
+            ..Default::default()
+        };
+        let track = state.track.mut_or_insert_default();
+        track.uri = "spotify:track:relinked".into();
+        track.uid = "row1".into();
+        let state = Some(Arc::new(state));
+        let mut spec = LoadSpec {
+            context_uri: Some("spotify:playlist:p?spotify-apply-lenses=enhance".into()),
+            offset_uri: Some("spotify:track:relinked".into()),
+            ..LoadSpec::default()
+        };
+        assert_eq!(same_row_uid(&state, &spec).as_deref(), Some("row1"));
+        // the same context again, or another one, goes by the uri
+        spec.context_uri = Some("spotify:playlist:p".into());
+        assert_eq!(same_row_uid(&state, &spec), None);
+        spec.context_uri = Some("spotify:playlist:q?spotify-apply-lenses=enhance".into());
+        assert_eq!(same_row_uid(&state, &spec), None);
+    }
+
     #[test]
     fn loading_another_song_keeps_repeat_with_or_without_shuffle() {
         for shuffle in [None, Some(false), Some(true)] {
@@ -1532,6 +1598,8 @@ mod tests {
         );
         assert!(state.position_at.is_none());
 
+        apply_event(&mut state, PlayerEvent::Seeked { play_request_id: 1, track_id: uri(), position_ms: 1000 });
+        assert!(state.position_at.is_none(), "A seek must not start the song clock during narration");
         assert!(apply_event(&mut state, PlayerEvent::NarrationEnded { play_request_id: 1, track_id: uri() }));
         assert!(!state.narrating);
         assert!(state.position_at.is_some());
@@ -1542,6 +1610,32 @@ mod tests {
         apply_event(&mut state, PlayerEvent::NarrationStarted { play_request_id: 2, track_id: uri() });
         apply_event(&mut state, PlayerEvent::Stopped { play_request_id: 2, track_id: uri() });
         assert!(!state.narrating);
+    }
+
+    /// librespot reports the packet it has just read, which is ahead of the sound by the
+    /// sink queue; the audible clock pulls it back, while seek positions stay as sent.
+    #[test]
+    fn the_reported_position_is_pulled_back_to_the_sound() {
+        let mut changed =
+            PlayerEvent::PositionChanged { play_request_id: 1, track_id: uri(), position_ms: 10_000 };
+        pull_back_to_the_ear(&mut changed, 267);
+        assert!(matches!(changed, PlayerEvent::PositionChanged { position_ms: 9_733, .. }));
+
+        let mut correction =
+            PlayerEvent::PositionCorrection { play_request_id: 1, track_id: uri(), position_ms: 10_000 };
+        pull_back_to_the_ear(&mut correction, 267);
+        assert!(matches!(correction, PlayerEvent::PositionCorrection { position_ms: 9_733, .. }));
+
+        // A resume with audio already queued starts at the paused position minus the queue;
+        // a fresh track starts at zero, where the saturation above keeps it.
+        let mut playing = PlayerEvent::Playing { play_request_id: 1, track_id: uri(), position_ms: 5_000 };
+        pull_back_to_the_ear(&mut playing, 267);
+        assert!(matches!(playing, PlayerEvent::Playing { position_ms: 4_733, .. }));
+
+        // A queue longer than the track position cannot push it below zero.
+        let mut start = PlayerEvent::PositionChanged { play_request_id: 1, track_id: uri(), position_ms: 100 };
+        pull_back_to_the_ear(&mut start, 500);
+        assert!(matches!(start, PlayerEvent::PositionChanged { position_ms: 0, .. }));
     }
 
     #[test]
@@ -1953,6 +2047,90 @@ mod tests {
         assert!(
             seen.to_ascii_uppercase().contains("CONNECT") && seen.contains("apresolve.spotify.com"),
             "librespot must go through the proxy, got {seen:?}"
+        );
+    }
+
+    /// Аудио с CDN часто по http://: через прокси и оно идёт туннелем CONNECT, а не «GET http://…» —
+    /// его многие прокси не пропускают, и треки не грузились, хотя страницы работали.
+    #[tokio::test]
+    async fn plain_http_audio_is_tunnelled_through_the_proxy() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = proxy.local_addr().unwrap();
+        let proxy_thread = std::thread::spawn(move || {
+            let (mut client, _) = proxy.accept().unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut buf = [0u8; 4096];
+            let n = client.read(&mut buf).unwrap_or(0);
+            let _ = client.write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n");
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+
+        let config = sf_auth::ProxyConfig::from_parts(
+            sf_auth::ProxyMode::Http,
+            "127.0.0.1",
+            &address.port().to_string(),
+            "",
+            "",
+        )
+        .unwrap();
+        let proxy_url = config.librespot_url().unwrap();
+        let client = librespot_core::http_client::HttpClient::new(Some(&proxy_url));
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("http://audio4-fa.scdn.co/audio/0123")
+            .body(Default::default())
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), client.request(request)).await;
+        let seen = proxy_thread.join().unwrap();
+        assert!(
+            seen.starts_with("CONNECT audio4-fa.scdn.co:80 HTTP/1.1"),
+            "plain-HTTP audio must be tunnelled, got {seen:?}"
+        );
+    }
+
+    /// HTTP-прокси с логином: движок не отказывается от него, а отдаёт логин в Proxy-Authorization.
+    #[tokio::test]
+    async fn librespot_authenticates_to_an_http_proxy_with_a_login() {
+        use base64::Engine as _;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = proxy.local_addr().unwrap();
+        let proxy_thread = std::thread::spawn(move || {
+            let (mut client, _) = proxy.accept().unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut buf = [0u8; 4096];
+            let n = client.read(&mut buf).unwrap_or(0);
+            let _ = client.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+
+        let config = sf_auth::ProxyConfig::from_parts(
+            sf_auth::ProxyMode::Http,
+            "127.0.0.1",
+            &address.port().to_string(),
+            "alice",
+            "s3cret:pass",
+        )
+        .unwrap();
+        assert!(config.engine_unsupported().is_none());
+        let proxy_url = config.librespot_url().expect("an HTTP proxy with a login is available to the engine");
+        let client = librespot_core::http_client::HttpClient::new(Some(&proxy_url));
+        let request = http::Request::builder()
+            .method("GET")
+            .uri("https://apresolve.spotify.com/")
+            .body(Default::default())
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), client.request(request)).await;
+        let seen = proxy_thread.join().unwrap();
+        let login = base64::engine::general_purpose::STANDARD.encode("alice:s3cret:pass");
+        assert!(
+            seen.contains(&format!("Basic {login}")),
+            "the proxy login must go out as Proxy-Authorization, got {seen:?}"
         );
     }
 }

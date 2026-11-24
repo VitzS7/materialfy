@@ -27,10 +27,12 @@ pub mod qobject {
 
     unsafe extern "RustQt" {
         #[qobject]
-        /// "en" | "ru" — the language applied right now (follows Settings.language; "system" resolved)
+        /// "en" | "ru" | "pt" — the language applied right now (follows Settings.language; "system" resolved)
         #[qproperty(QString, language, READ, NOTIFY = language_changed)]
         /// English source → Russian; plural keys "one|many" → "one|few|many"
         #[qproperty(QMap_QString_QVariant, ru, READ, CONSTANT)]
+        /// English source → Portuguese; plural keys "one|many" → "one|many"
+        #[qproperty(QMap_QString_QVariant, pt, READ, CONSTANT)]
         type Translations = super::TranslationsRust;
 
         #[qsignal]
@@ -49,15 +51,25 @@ pub mod qobject {
 pub struct TranslationsRust {
     language: QString,
     ru: QVariantMap,
+    pt: QVariantMap,
+}
+
+/// The embedded dictionary of `lang` as a QML map (empty for English).
+fn dictionary_map(lang: Lang) -> QVariantMap {
+    let mut map = QVariantMap::default();
+    for (en, value) in mf_i18n::dictionary(lang).into_iter().flatten() {
+        map.insert(QString::from(en.as_str()), QVariant::from(&QString::from(value.as_str())));
+    }
+    map
 }
 
 impl Default for TranslationsRust {
     fn default() -> Self {
-        let mut ru = QVariantMap::default();
-        for (en, value) in mf_i18n::dictionary(Lang::Ru).into_iter().flatten() {
-            ru.insert(QString::from(en.as_str()), QVariant::from(&QString::from(value.as_str())));
+        Self {
+            language: QString::from(mf_i18n::lang().code()),
+            ru: dictionary_map(Lang::Ru),
+            pt: dictionary_map(Lang::Pt),
         }
-        Self { language: QString::from(mf_i18n::lang().code()), ru }
     }
 }
 
@@ -78,7 +90,7 @@ fn os_languages() -> &'static [String] {
     })
 }
 
-/// The language to show for the stored setting: "en"/"ru" as is, "system" (default) from the OS UI language.
+/// The language to show for the stored setting: "en"/"ru"/"pt" as is, "system" (default) from the OS UI language.
 pub fn effective_language(store: &mf_platform::SettingsStore) -> Lang {
     mf_i18n::parse_setting(&store.get_str(SettingKey::Language)).resolve(os_languages())
 }

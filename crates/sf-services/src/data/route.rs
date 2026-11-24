@@ -30,6 +30,26 @@ fn session_for(api: &ApiGateway, player: &PlayerHandle, _operation: Operation) -
     account_session(api, player)
 }
 
+/// Сколько фоновое чтение на старте ждёт подключения движка, прежде чем пойти в Web API.
+pub const STARTUP_SESSION_WAIT: Duration = Duration::from_secs(20);
+
+/// Сессия того же аккаунта; пока движок подключается (LocalPlayback::Connecting) — ждать её, не дольше `max`.
+/// На старте Web API готов сразу (сохранённый профиль), а сессия — через секунды: без ожидания библиотека
+/// и история ушли бы в Web API, а потом перечитались бы через сессию ещё раз.
+pub async fn wait_account_session(api: &ApiGateway, player: &PlayerHandle, max: Duration) -> Option<sf_player::Session> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(session) = account_session(api, player) {
+            return Some(session);
+        }
+        let coming = matches!(player.local_playback(), sf_player::LocalPlayback::Connecting);
+        if !coming || started.elapsed() >= max {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// Сессия librespot того же аккаунта, что и Web API (иначе её ответ — про чужую библиотеку).
 pub fn account_session(api: &ApiGateway, player: &PlayerHandle) -> Option<sf_player::Session> {
     let session = player.session()?;

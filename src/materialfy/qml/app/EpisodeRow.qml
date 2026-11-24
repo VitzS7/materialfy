@@ -22,7 +22,8 @@ Item {
     readonly property real progress: isCurrent ? Player.position
                                    : durationMs > 0 ? Math.min(1, resumeMs / durationMs) : 0
     readonly property bool saved: Library.savedRevision >= 0 && uri !== "" ? Library.isSaved(uri) : episode.saved === true
-    readonly property bool hovered: hover.hovered
+    // на телефоне действия строки видны всегда: наведения нет
+    readonly property bool hovered: hover.hovered || Theme.mobile
 
     implicitHeight: content.implicitHeight + 24
     implicitWidth: 480
@@ -67,6 +68,15 @@ Item {
         anchors.fill: parent
         radius: Theme.shape.extraLarge
         onClicked: if ((root.episode.episodeId ?? "") !== "") Catalog.openEpisode(root.episode.episodeId)
+        onPressAndHold: mouse => {
+            if (!Theme.mobile) {
+                mouse.accepted = false
+                return
+            }
+            MobileShell.haptic()
+            const p = mapToItem(null, mouse.x, mouse.y)
+            Catalog.requestTrackMenu(root.trackData(), p.x, p.y)
+        }
     }
     HoverHandler { id: hover }
     // выпуск можно перетащить в очередь, как строку трека
@@ -80,6 +90,7 @@ Item {
     }
     TapHandler {
         acceptedButtons: Qt.RightButton
+        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad   // касание — не правый клик: у него нет кнопок, TapHandler принял бы любой тап
         onTapped: point => {
             const p = root.mapToItem(null, point.position.x, point.position.y)
             Catalog.requestTrackMenu(root.trackData(), p.x, p.y)
@@ -158,6 +169,7 @@ Item {
                         visible: root.isCurrent
                         size: 40
                         playing: Player.playing
+                        loading: Player.buffering
                         pausedShape: "circle"
                         spin: false
                         onClicked: root.play()
@@ -241,14 +253,21 @@ Item {
                         iconColor: root.saved ? Theme.primary : Theme.fgSurfaceVariant
                         onClicked: Library.toggleSaved(root.uri)
                     }
-                    IconButton {
-                        id: moreButton
-                        icon: "more_horiz"
-                        size: "xs"
-                        visible: root.hovered || root.isCurrent
-                        onClicked: {
-                            const p = moreButton.mapToItem(null, 0, 0)
-                            Catalog.requestTrackMenuAt(root.trackData(), p.x, p.y, moreButton.width, moreButton.height)
+                    // «⋯» создаётся с первого наведения и остаётся (строк много, а наведена одна);
+                    // видимость — на самой кнопке, как и раньше
+                    Loader {
+                        // невидимый item всё равно занимает ширину в Row — прячем сам Loader
+                        active: root.hovered || root.isCurrent || item !== null
+                        visible: item !== null && item.visible
+                        sourceComponent: IconButton {
+                            id: moreButton
+                            icon: "more_horiz"
+                            size: "xs"
+                            visible: root.hovered || root.isCurrent
+                            onClicked: {
+                                const p = moreButton.mapToItem(null, 0, 0)
+                                Catalog.requestTrackMenuAt(root.trackData(), p.x, p.y, moreButton.width, moreButton.height)
+                            }
                         }
                     }
                 }

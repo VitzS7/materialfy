@@ -1,5 +1,6 @@
 //! Общий HTTP-клиент с заменой на лету (смена прокси без перезапуска). Перенос spotifast/src/http.rs.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -13,13 +14,23 @@ use sf_auth::ProxyConfig;
 #[derive(Clone)]
 pub struct Http {
     inner: Arc<RwLock<Result<reqwest::Client, String>>>,
+    /// «Обложки мимо прокси»: пока флаг поднят, client() отдаёт прямой клиент (см. `bypassing`)
+    bypass: Option<(Arc<AtomicBool>, reqwest::Client)>,
 }
 
 impl Http {
     pub fn new(client: reqwest::Client) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Ok(client))),
+            bypass: None,
         }
+    }
+
+    /// Тот же клиент, но пока `direct` поднят — прямой, без прокси (обложки: CDN картинок часто доступен
+    /// напрямую, а прокси медленный или платный по трафику). Смена прокси по-прежнему видна, пока флаг опущен.
+    pub fn bypassing(&self, direct: Arc<AtomicBool>) -> Self {
+        let client = build_client(&ProxyConfig::Off).unwrap_or_default();
+        Self { inner: self.inner.clone(), bypass: Some((direct, client)) }
     }
 
     pub fn from_proxy(proxy: &ProxyConfig) -> Result<Self, String> {
@@ -31,6 +42,7 @@ impl Http {
     pub fn unavailable(error: String) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Err(error))),
+            bypass: None,
         }
     }
 
@@ -43,6 +55,11 @@ impl Http {
     }
 
     pub fn client(&self) -> Result<reqwest::Client, String> {
+        if let Some((direct, client)) = &self.bypass
+            && direct.load(Ordering::Relaxed)
+        {
+            return Ok(client.clone());
+        }
         self.inner
             .read()
             .unwrap_or_else(|lock| lock.into_inner())

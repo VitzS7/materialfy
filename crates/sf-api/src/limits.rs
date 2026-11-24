@@ -44,6 +44,10 @@ const POLL_BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
 const SHOW_AFTER: Duration = Duration::from_secs(5);
 /// Сколько живёт ответ GET в кэше.
 const CACHE_TTL: Duration = Duration::from_secs(20);
+/// Каталог (альбомы, исполнители, треки, шоу) меняется редко: его ответы живут дольше.
+const CATALOG_TTL: Duration = Duration::from_secs(10 * 60);
+/// Свои списки (/me/tracks, /me/albums…): записи через Web API или сессию кэш и так сбрасывают.
+const USER_TTL: Duration = Duration::from_secs(60);
 /// После записи кэш не наполняется: перепроверки snapshot/обложки должны видеть свежий ответ.
 const WRITE_QUIET: Duration = Duration::from_secs(60);
 const CACHE_MAX: usize = 128;
@@ -101,8 +105,9 @@ fn budget(source: ApiSource) -> usize {
 fn share(priority: Priority, budget: usize) -> usize {
     match priority {
         Priority::Interactive => usize::MAX,
-        Priority::Background => budget * 2 / 3,
-        Priority::Polling => (budget / 4).max(1),
+        // фон и опрос — меньше половины окна: обход библиотеки на старте не съедает место страницам
+        Priority::Background => budget / 3,
+        Priority::Polling => (budget / 8).max(1),
     }
 }
 
@@ -317,6 +322,7 @@ impl Drop for Landing<'_> {
 
 struct Cached {
     at: Instant,
+    ttl: Duration,
     body: String,
 }
 
@@ -501,17 +507,17 @@ impl Limits {
         if let Ok(body) = &result
             && !ttl.is_zero()
             && self.generation.load(Ordering::SeqCst) == generation
-            && !self.recently_written()
+            && (is_catalog(&flight_key.1.1) || !self.recently_written())
         {
             let mut cache = lock(&self.cache);
             if cache.len() >= CACHE_MAX {
                 let now = Instant::now();
-                cache.retain(|_, cached| now.duration_since(cached.at) < CACHE_TTL);
+                cache.retain(|_, cached| now.duration_since(cached.at) < cached.ttl);
                 if cache.len() >= CACHE_MAX {
                     cache.clear();
                 }
             }
-            cache.insert(flight_key.1, Cached { at: Instant::now(), body: body.clone() });
+            cache.insert(flight_key.1, Cached { at: Instant::now(), ttl, body: body.clone() });
         }
         result
     }
@@ -525,16 +531,22 @@ impl Limits {
         lock(&self.last_write).is_some_and(|at| at.elapsed() < WRITE_QUIET)
     }
 
-    /// Запись (PUT/POST/DELETE) любым источником: кэш и склейка начинаются заново.
+    /// Запись (PUT/POST/DELETE) любым источником: кэш своих данных и склейка начинаются заново (каталог остаётся).
     pub(crate) fn wrote(&self) {
         *lock(&self.last_write) = Some(Instant::now());
-        self.forget();
+        self.forget_user_data();
     }
 
-    /// Забыть кэш ответов (выход, смена аккаунта, запись мимо Web API — например, через сессию).
+    /// Забыть кэш ответов (выход, смена аккаунта).
     pub fn forget(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         lock(&self.cache).clear();
+    }
+
+    /// Забыть то, что может поменять запись мимо Web API (библиотека и плейлисты через сессию): каталог остаётся.
+    pub fn forget_user_data(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        lock(&self.cache).retain(|key, _| is_catalog(&key.1));
     }
 }
 
@@ -544,9 +556,29 @@ fn cache_key(path: &str, query: &[(&str, String)]) -> String {
     format!("{path}?{}", pairs.join("&"))
 }
 
-/// Состояние плеера кэшировать нельзя: оно меняется каждую секунду.
+/// Состояние плеера кэшировать нельзя: оно меняется каждую секунду. Каталог — надолго, свои списки — на минуту.
 fn ttl_for(path: &str) -> Duration {
-    if path.starts_with("/me/player") { Duration::ZERO } else { CACHE_TTL }
+    if path.starts_with("/me/player") {
+        Duration::ZERO
+    } else if is_catalog(path) {
+        CATALOG_TTL
+    } else if path.starts_with("/me/") {
+        USER_TTL
+    } else {
+        CACHE_TTL
+    }
+}
+
+/// Справочные данные каталога: запись в библиотеку или плейлист их не меняет.
+fn is_catalog(path: &str) -> bool {
+    const CATALOG: [&str; 6] = ["/albums", "/artists", "/tracks", "/shows", "/episodes", "/audiobooks"];
+    CATALOG.iter().any(|prefix| path.starts_with(prefix))
+}
+
+/// Пауза с разбросом +10…30 %: клиенты, получившие 429 вместе, не возвращаются вместе.
+pub(crate) fn jittered(wait: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    wait.mul_f64(1.1 + 0.2 * f64::from(nanos % 1000) / 1000.0)
 }
 
 #[cfg(test)]
@@ -563,13 +595,13 @@ mod tests {
         let start = Instant::now();
         let mut state = SourceState::new();
         let budget = 40;
-        // опрос: четверть окна, дальше — отказ без ожидания
-        for _ in 0..10 {
+        // опрос: восьмая часть окна, дальше — отказ без ожидания
+        for _ in 0..5 {
             assert_eq!(state.decide(Priority::Polling, start, budget), Decision::Go);
         }
         assert_eq!(state.decide(Priority::Polling, start, budget), Decision::Fail(LimitKind::RateLimited));
-        // фон: до двух третей, дальше ждёт, пока окно не освободится
-        for _ in 10..26 {
+        // фон: до трети, дальше ждёт, пока окно не освободится
+        for _ in 5..13 {
             assert_eq!(state.decide(Priority::Background, start, budget), Decision::Go);
         }
         assert_eq!(state.decide(Priority::Background, at(start, 1), budget), Decision::Wait(Duration::from_secs(29)));
@@ -741,13 +773,17 @@ mod tests {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok::<_, ApiError>(format!("v{}", calls.load(Ordering::SeqCst)))
         };
-        assert_eq!(limits.get(ApiSource::Shared, "/albums/1", &[], fetch()).await.unwrap(), "v1");
-        assert_eq!(limits.get(ApiSource::Shared, "/albums/1", &[], fetch()).await.unwrap(), "v1");
+        assert_eq!(limits.get(ApiSource::Shared, "/me/albums", &[], fetch()).await.unwrap(), "v1");
+        assert_eq!(limits.get(ApiSource::Shared, "/me/albums", &[], fetch()).await.unwrap(), "v1");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        limits.wrote();
         assert_eq!(limits.get(ApiSource::Shared, "/albums/1", &[], fetch()).await.unwrap(), "v2");
-        // сразу после записи кэш не наполняется: перепроверки видят свежий ответ
-        assert_eq!(limits.get(ApiSource::Shared, "/albums/1", &[], fetch()).await.unwrap(), "v3");
+        limits.wrote();
+        assert_eq!(limits.get(ApiSource::Shared, "/me/albums", &[], fetch()).await.unwrap(), "v3");
+        // сразу после записи свои данные не кэшируются: перепроверки видят свежий ответ
+        assert_eq!(limits.get(ApiSource::Shared, "/me/albums", &[], fetch()).await.unwrap(), "v4");
+        // каталог запись не меняет: он остаётся в кэше
+        assert_eq!(limits.get(ApiSource::Shared, "/albums/1", &[], fetch()).await.unwrap(), "v2");
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]

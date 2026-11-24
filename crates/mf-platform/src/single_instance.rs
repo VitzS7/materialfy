@@ -58,6 +58,39 @@ pub async fn raise_running_instance() -> bool {
     }
 }
 
+/// Сколько новый процесс ждёт, пока уже запущенный (может, ещё стартующий) экземпляр откликнется.
+#[cfg(target_os = "windows")]
+const PRIMARY_WAIT: Duration = Duration::from_secs(20);
+
+/// Стать единственным экземпляром. true — этот процесс первый, работать дальше; false — уже работает другой
+/// (его окно показано) — выйти. Windows: именованный мьютекс занимается атомарно с самого начала запуска,
+/// поэтому два одновременных запуска (двойной клик, автозапуск и ярлык) не стартуют оба, даже пока первый ещё
+/// не открыл канал просьб. Зависший экземпляр raise завершает — тогда место занимает этот процесс.
+pub async fn become_primary() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let deadline = std::time::Instant::now() + PRIMARY_WAIT;
+        loop {
+            if imp::claim() {
+                // мьютекс свободен, но канал может держать версия до мьютекса — её окно и показать
+                return !raise_running_instance().await;
+            }
+            if raise_running_instance().await {
+                return false;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!("another Materialfy is starting but doesn't answer; not starting a second one");
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        !raise_running_instance().await
+    }
+}
+
 /// Слушатель просьб «показать окно» от новых процессов (Windows/macOS).
 /// На Linux не нужен: `start` возвращает Err(Unsupported), просьба приходит через MPRIS.
 pub struct InstanceListener {
@@ -271,6 +304,32 @@ mod imp {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Занять мьютекс экземпляра на всё время жизни процесса; false — его держит другой процесс.
+    pub fn claim() -> bool {
+        use std::sync::OnceLock;
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        static HELD: OnceLock<usize> = OnceLock::new();
+        if HELD.get().is_some() {
+            return true;
+        }
+        let name: Vec<u16> = format!(r"Local\{ORGANIZATION}-{APPLICATION}-instance").encode_utf16().chain([0]).collect();
+        // SAFETY: имя — строка с нулём на конце; дескриптор либо закрывается здесь же, либо живёт до конца процесса
+        unsafe {
+            let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+            if handle.is_null() {
+                // мьютекс не создать (права, странная среда) — не мешаем запуску, остаётся канал
+                return true;
+            }
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                CloseHandle(handle);
+                return false;
+            }
+            let _ = HELD.set(handle as usize);
+        }
+        true
     }
 
     fn create(name: &str, first: bool) -> std::io::Result<NamedPipeServer> {

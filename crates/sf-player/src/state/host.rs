@@ -14,6 +14,16 @@ use crate::{Credentials, EngineStarted};
 /// Сколько обрывов сессии подряд терпим за десять минут.
 const RECONNECT_LIMIT: usize = 5;
 const RECONNECT_WINDOW: Duration = Duration::from_secs(600);
+/// На телефоне сессия обрывается, когда Wi-Fi сменился на мобильную сеть или экран спал; первое
+/// переподключение тогда падает, потому что сети ещё нет, и без повторов музыка молчала до ручного включения.
+const RECONNECT_RETRY_WAITS: [Duration; 6] = [
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+];
 
 /// Английский ключ перевода; наружу — `mf_i18n::t(PREMIUM_REQUIRED)` (в обоих языках есть «Premium»: по нему
 /// sf-services узнаёт отказ).
@@ -125,6 +135,18 @@ impl EngineHost {
     /// `load` — что загрузить в новый движок вместо одного трека (контекст, список, режимы — из ядра);
     /// оборвавшаяся сессия librespot всё равно восстанавливается своим снимком.
     pub fn restart(self: &Arc<Self>, rt: &Handle, config: Option<EngineConfig>, volume: u16, load: Option<LoadSpec>) {
+        self.restart_with_retries(rt, config, volume, load, &[]);
+    }
+
+    /// `retry_waits`: паузы между повторными попытками, если подключение не удалось (сети в этот момент нет).
+    fn restart_with_retries(
+        self: &Arc<Self>,
+        rt: &Handle,
+        config: Option<EngineConfig>,
+        volume: u16,
+        load: Option<LoadSpec>,
+        retry_waits: &'static [Duration],
+    ) {
         let Some(old) = self.take() else {
             return;
         };
@@ -139,7 +161,24 @@ impl EngineHost {
         let host = self.clone();
         let credentials = old.credentials;
         rt.spawn(async move {
-            let _ = host.connect(credentials, config, resume).await;
+            let mut waits = retry_waits.iter();
+            loop {
+                let ours = host.current_generation() + 1;
+                let Err(error) = host.connect(credentials.clone(), config.clone(), resume.clone()).await else {
+                    return;
+                };
+                // отказ по подписке не лечится повтором; чужой connect/disconnect уже занял поколение
+                let Some(wait) = waits.next().filter(|_| !error.to_lowercase().contains("premium")) else {
+                    return;
+                };
+                if host.current_generation() != ours {
+                    return;
+                }
+                tokio::time::sleep(*wait).await;
+                if host.current_generation() != ours {
+                    return;
+                }
+            }
         });
     }
 
@@ -162,7 +201,7 @@ impl EngineHost {
             return;
         }
         tracing::info!("the librespot session ended; reconnecting");
-        self.restart(rt, None, volume, None);
+        self.restart_with_retries(rt, None, volume, None, &RECONNECT_RETRY_WAITS);
     }
 
     pub fn disconnect(&self) {

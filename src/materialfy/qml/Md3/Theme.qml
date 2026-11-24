@@ -2,6 +2,7 @@ pragma Singleton
 import QtQuick
 import Materialfy.Core
 import "ColorMix.js" as Mix
+import "Typography.js" as Typography
 
 // Токены MD3 Expressive. Цвета берутся из ThemeEngine и плавно анимируются при смене обложки.
 Item {
@@ -22,6 +23,11 @@ Item {
     // Если задан ThemeWipe — схема меняется «шторкой» в сторону wipeDirection (+1 вправо, -1 влево),
     // иначе — плавной анимацией всех цветов.
     property Item wipe: null
+    // Шторки окон поверх приложения (островок, плеер в панели задач): идут вместе с основной. Снимки
+    // со старыми цветами снимаются во всех окнах, схема меняется, когда готовы все, и снимки уходят разом
+    property var floatingWipes: []
+    function addWipe(w) { floatingWipes = floatingWipes.filter(x => x !== w).concat([w]) }
+    function removeWipe(w) { floatingWipes = floatingWipes.filter(x => x !== w) }
     // Окно не в фокусе: декоративные бесконечные анимации стоят. Каждая такая анимация заставляет
     // перерисовывать всё окно на частоте монитора — это основная нагрузка в фоне.
     property bool calm: false
@@ -37,6 +43,11 @@ Item {
     // Режим для слабых ПК, включённый вручную, тоже: на совсем слабой машине тормозят и переходы.
     readonly property bool reducedMotion: Settings.animations === "reduced" || Settings.lowPowerMode === "on"
         || (Settings.animations === "system" && Settings.systemReducedMotion === true)
+    // Раскладка телефона (MobileMain.qml, сборка для Android и --mobile): касания вместо курсора — без наведения,
+    // крупные цели, нижние листы вместо всплывающих меню. safeTop/safeBottom — системные панели и вырез экрана.
+    property bool mobile: false
+    property real safeTop: 0
+    property real safeBottom: 0
     // Цвет схемы, когда ничего не играет
     readonly property color defaultSeed: "#8C6DFF"   // Ultraviolet, BRAND_SEED в bridges/theme.rs
     // Новая схема применена: instant — мгновенно под шторкой, иначе — началась плавная анимация.
@@ -152,11 +163,40 @@ Item {
             if (root.lowPower)
                 root._applyNow()
             else if (root.wipe !== null && root.wipe.visible)
-                root.wipe.start(root.wipeDirection, root._applyNow)
+                root._wipeAll()
             else
                 root._startTransition()
         }
     }
+
+    property var _wiping: []
+    property int _wipeLeft: 0
+    function _wipeAll() {
+        const ws = [wipe].concat(floatingWipes.filter(w => w && w.onScreen))
+        _wiping = ws
+        _wipeLeft = ws.length
+        for (const w of ws)
+            w.start(wipeDirection, root._wipeReady)
+        _wipeTimeout.restart()
+    }
+    function _wipeReady(w) {
+        if (_wipeLeft <= 0) {       // опоздал: схема уже сменилась
+            w.reveal()
+            return
+        }
+        if (--_wipeLeft === 0)
+            _wipeGo()
+    }
+    function _wipeGo() {
+        _wipeTimeout.stop()
+        _wipeLeft = 0
+        _applyNow()
+        for (const w of _wiping)
+            w.reveal()
+        _wiping = []
+    }
+    // окно, которое не рисуется (спрятано), снимок не даст: долго не ждём
+    Timer { id: _wipeTimeout; interval: 300; onTriggered: if (root._wipeLeft > 0) root._wipeGo() }
 
     NumberAnimation {
         id: _anim
@@ -260,23 +300,13 @@ Item {
     }
 
     // size / lineHeight / weight / letterSpacing (px)
-    readonly property var type: ({
-        displayLarge:   { size: 57, line: 64, weight: 400, tracking: -0.25 },
-        displayMedium:  { size: 45, line: 52, weight: 400, tracking: 0 },
-        displaySmall:   { size: 36, line: 44, weight: 400, tracking: 0 },
-        headlineLarge:  { size: 32, line: 40, weight: 400, tracking: 0 },
-        headlineMedium: { size: 28, line: 36, weight: 400, tracking: 0 },
-        headlineSmall:  { size: 24, line: 32, weight: 400, tracking: 0 },
-        titleLarge:     { size: 22, line: 28, weight: 400, tracking: 0 },
-        titleMedium:    { size: 16, line: 24, weight: 500, tracking: 0.15 },
-        titleSmall:     { size: 14, line: 20, weight: 500, tracking: 0.1 },
-        bodyLarge:      { size: 16, line: 24, weight: 400, tracking: 0.5 },
-        bodyMedium:     { size: 14, line: 20, weight: 400, tracking: 0.25 },
-        bodySmall:      { size: 12, line: 16, weight: 400, tracking: 0.4 },
-        labelLarge:     { size: 14, line: 20, weight: 500, tracking: 0.1 },
-        labelMedium:    { size: 12, line: 16, weight: 500, tracking: 0.5 },
-        labelSmall:     { size: 11, line: 16, weight: 500, tracking: 0.5 }
-    })
+    readonly property real fontScale: mobile ? MobileShell.fontScale : 1
+    readonly property var type: Typography.scaled(Typography.styles, sp =>
+        root.mobile && root.fontScale !== 1 ? MobileShell.textSize(sp) : sp)
+
+    function trackRowHeight(compact) {
+        return Math.max(compact ? 56 : 64, type.bodyLarge.line + type.bodyMedium.line + (compact ? 12 : 20))
+    }
 
     // ---- Формы (радиусы скругления) -----------------------------------------
     readonly property QtObject shape: QtObject {
@@ -306,17 +336,28 @@ Item {
     // Пружины MD3 Expressive аппроксимированы кривыми с перелётом (OutBack),
     // эффекты (цвет, прозрачность) — без перелёта.
     readonly property QtObject motion: QtObject {
-        readonly property int spatialFast: root.reducedMotion ? 0 : 350
-        readonly property int spatialDefault: root.reducedMotion ? 0 : 500
-        readonly property int spatialSlow: root.reducedMotion ? 0 : 650
-        readonly property int effectsFast: 150
-        readonly property int effectsDefault: 200
-        readonly property int effectsSlow: 300
-        readonly property real overshoot: 1.25
+        // Телефон: короткий отклик, спокойное перемещение; для больших раскрытий — отдельный токен.
+        readonly property int press: root.reducedMotion ? 0 : 100
+        readonly property int spatialFast: root.reducedMotion ? 0 : root.mobile ? 200 : 300
+        readonly property int spatialDefault: root.reducedMotion ? 0 : root.mobile ? 280 : 420
+        readonly property int spatialSlow: root.reducedMotion ? 0 : root.mobile ? 380 : 550
+        readonly property int playerReveal: root.reducedMotion ? 0 : root.mobile ? 440 : 660
+        readonly property int effectsFast: root.mobile ? 110 : 130
+        readonly property int effectsDefault: root.mobile ? 150 : 170
+        readonly property int effectsSlow: root.mobile ? 200 : 250
+        readonly property real overshoot: root.mobile ? 0.6 : 1.25
 
         readonly property var emphasized: [0.2, 0.0, 0.0, 1.0, 1.0, 1.0]
+        // ровное перемещение «из точки в точку» (плеер → мини-плеер): мягкий разгон и мягкое торможение,
+        // без рывка в середине, как у emphasized
+        readonly property var smoothMove: [0.4, 0.0, 0.2, 1.0, 1.0, 1.0]
         readonly property var emphasizedDecelerate: [0.05, 0.7, 0.1, 1.0, 1.0, 1.0]
         readonly property var emphasizedAccelerate: [0.3, 0.0, 0.8, 0.15, 1.0, 1.0]
         readonly property var standard: [0.2, 0.0, 0.0, 1.0, 1.0, 1.0]
+        // Пружины MD3 Expressive в виде кривых (токены motion-scheme expressive): быстрая — для мелких
+        // элементов (индикатор, иконка, чип), обычная — для крупных; эффекты — без перелёта
+        readonly property var springFast: [0.42, 1.67, 0.21, 0.90, 1.0, 1.0]
+        readonly property var springDefault: [0.38, 1.21, 0.22, 1.00, 1.0, 1.0]
+        readonly property var effects: [0.31, 0.94, 0.34, 1.00, 1.0, 1.0]
     }
 }

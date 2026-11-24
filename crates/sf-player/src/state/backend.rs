@@ -8,6 +8,7 @@ use std::sync::Arc;
 use md3_model::TrackItem;
 use sf_api::models::{Page, Track};
 use sf_api::{ApiError, ApiGateway, Operation};
+use sf_api::util::{uri_id, uri_kind};
 
 use super::core::{ApiCall, ApiReply, FetchedQueue, RemoteAction, RemoteState};
 use super::map;
@@ -27,6 +28,8 @@ pub trait LocalEngine: Send + Sync {
     fn command(&self, command: PlayerCommand) -> Result<(), String>;
     /// уровень звука 0..1 для «дыхания» обложки
     fn level(&self) -> f64;
+    /// Гейт уровня: пока false, движок не наполняет tap (AudioTap::set_wanted).
+    fn set_levels_wanted(&self, _wanted: bool) {}
 }
 
 /// Engine + его tap уровня.
@@ -42,6 +45,10 @@ impl LocalEngine for EngineLink {
 
     fn level(&self) -> f64 {
         self.tap.level()
+    }
+
+    fn set_levels_wanted(&self, wanted: bool) {
+        self.tap.set_wanted(wanted);
     }
 }
 
@@ -73,7 +80,7 @@ impl WebBackend for SpotifyBackend {
 
 async fn run(api: Arc<ApiGateway>, call: ApiCall) -> ApiReply {
     let operation = match call {
-        ApiCall::AlbumTracks { .. } => Operation::Catalog,
+        ApiCall::AlbumTracks { .. } | ApiCall::TrackInfo { .. } => Operation::Catalog,
         _ => Operation::Playback,
     };
     let client = api.client_for(operation).await;
@@ -116,7 +123,11 @@ async fn run(api: Arc<ApiGateway>, call: ApiCall) -> ApiReply {
                 Ok(client) => {
                     let device = device.as_deref();
                     // перемешивание и запуск — одним упорядоченным обменом, иначе shuffle иногда проигрывает
-                    let shuffled = if shuffle { client.set_shuffle(true, device).await } else { Ok(()) };
+                    let shuffled = if shuffle || request.context_uri.as_deref() == Some(md3_model::context::DJ_URI) {
+                        client.set_shuffle(shuffle, device).await
+                    } else {
+                        Ok(())
+                    };
                     match shuffled {
                         Ok(()) => client.play(device, Some(&request)).await,
                         Err(error) => Err(error),
@@ -161,6 +172,26 @@ async fn run(api: Arc<ApiGateway>, call: ApiCall) -> ApiReply {
                 Err(error) => Err(error),
             };
             ApiReply::AlbumTracks { request, result }
+        }
+        ApiCall::TrackInfo { request, uri } => {
+            let result = match client {
+                Ok(client) => {
+                    let id = uri_id(&uri).unwrap_or_default().to_owned();
+                    let fetched = if uri_kind(&uri) == Some("episode") {
+                        client.episode(&id).await.map(|episode| sf_api::map::episode_track(&episode))
+                    } else {
+                        client.track(&id).await.map(|track| sf_api::map::track_item(&track))
+                    };
+                    fetched.map(|mut item| {
+                        // ответ мог прийти с другим URI (рынок/точная версия) — оставляем тот, что играет
+                        item.uri = uri.clone();
+                        item.track_id = id.clone();
+                        item
+                    })
+                }
+                Err(error) => Err(error),
+            };
+            ApiReply::TrackInfo { request, uri, result }
         }
     }
 }

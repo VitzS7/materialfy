@@ -14,6 +14,8 @@ Item {
     property Item source
     property string mode: "wipe"
     property Item originItem
+    // размер снимка, px (пусто — по размеру source): source под scale (островок) иначе снимается мельче, чем виден
+    property alias textureSize: snap.textureSize
     readonly property int duration: ({ ripple: 900, dissolve: 1000, liquid: 1200 })[mode] ?? 650
     readonly property bool running: _phase !== 0
 
@@ -25,11 +27,17 @@ Item {
     property real _seed: 0
     property var _apply: null
 
-    // Запуск: apply() переключает тему; вызывается, когда снимок со старыми цветами уже готов.
-    function start(direction, apply) {
+    // Окно рисуется: шторке окна, которого не видно, снимок не снять
+    readonly property bool onScreen: visible && Window.window !== null && Window.window.visible
+        && Window.visibility !== Window.Minimized
+
+    // Запуск: ready(wipe) — снимок со старыми цветами готов и лежит поверх; тема переключается под ним,
+    // и reveal() уводит снимок. Несколько окон так меняют тему разом (Theme.floatingWipes).
+    function start(direction, ready) {
         anim.stop()
+        effect.progress = 0
         _dir = direction < 0 ? -1 : 1
-        _apply = apply
+        _apply = ready
         _frames = 0
         _seed = Math.random() * 50
         const it = originItem
@@ -52,7 +60,13 @@ Item {
     }
 
     // Видна и во время снимка (с shown: 0): текстура источника обновляется, только когда её кто-то рисует.
+    function reveal() {
+        if (_phase === 2 && !anim.running)
+            anim.restart()
+    }
+
     ShaderEffect {
+        id: effect
         anchors.fill: parent
         visible: root._phase !== 0
         property variant source: snap
@@ -87,10 +101,12 @@ Item {
             if (++root._frames < 2)
                 return
             root._phase = 2
-            if (root._apply)
-                root._apply()
+            const ready = root._apply
             root._apply = null
-            anim.restart()
+            if (ready)
+                ready(root)
+            else
+                root.reveal()
         }
     }
 }

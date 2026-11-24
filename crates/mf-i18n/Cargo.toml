@@ -1,6 +1,6 @@
 [package]
 name = "mf-i18n"
-description = "Materialfy localisation: English source strings, embedded Russian dictionary (i18n/ru/*.json)"
+description = "Materialfy localisation: English source strings, embedded Russian and Portuguese dictionaries (i18n/ru/*.json, i18n/pt/*.json)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -135,19 +135,18 @@ impl ProxyConfig {
         }
     }
 
-    /// Выбранный вручную прокси, через который librespot пойти не может (SOCKS5, HTTP с логином):
-    /// движок тогда не запускают, чтобы он не ушёл к Spotify напрямую. Текст — для интерфейса.
+    /// Выбранный вручную прокси, через который librespot пойти не может (SOCKS5): движок тогда не запускают,
+    /// чтобы он не ушёл к Spotify напрямую. Текст — для интерфейса.
     pub fn engine_unsupported(&self) -> Option<String> {
         match self {
-            Self::Socks(_) => Some(mf_i18n::t(ENGINE_NEEDS_PLAIN_HTTP)),
-            Self::Http(manual) if manual.librespot_url().is_none() => Some(mf_i18n::t(ENGINE_NEEDS_PLAIN_HTTP)),
+            Self::Socks(_) => Some(mf_i18n::t(ENGINE_NEEDS_HTTP)),
             _ => None,
         }
     }
 }
 
-const ENGINE_NEEDS_PLAIN_HTTP: &str =
-    "Playback on this computer only works through an HTTP proxy without a password — otherwise audio would bypass the proxy";
+const ENGINE_NEEDS_HTTP: &str =
+    "Playback on this computer only works through an HTTP proxy — over SOCKS5 audio would bypass the proxy";
 
 /// HTTP-прокси, который режим System отдал бы движку. Системный SOCKS движок не умеет.
 fn system_http_proxy() -> Option<reqwest::Url> {
@@ -264,8 +263,14 @@ impl ManualProxy {
         Ok(proxy)
     }
 
+    /// Адрес для librespot, с логином: он уходит прокси в Proxy-Authorization (форк librespot). Не для логов.
     fn librespot_url(&self) -> Option<reqwest::Url> {
-        (self.username.is_empty() && self.password.is_empty()).then(|| self.endpoint.clone())
+        let mut url = self.endpoint.clone();
+        if !self.username.is_empty() {
+            url.set_username(&self.username).ok()?;
+            url.set_password((!self.password.is_empty()).then_some(self.password.as_str())).ok()?;
+        }
+        Some(url)
     }
 
     /// Адрес без учётных данных — для логов.
@@ -389,8 +394,10 @@ mod tests {
         assert_eq!(proxy.username, "alice/name");
         assert_eq!(proxy.password, " secret/with spaces ");
         assert!(proxy.reqwest_proxy().is_ok());
-        assert_eq!(ProxyConfig::Http(proxy.clone()).librespot_url(), None);
-        assert!(ProxyConfig::Http(proxy.clone()).engine_unsupported().is_some());
+        // движку логин нужен (Proxy-Authorization), поэтому он в его адресе — но не в Debug
+        let engine = ProxyConfig::Http(proxy.clone()).librespot_url().unwrap();
+        assert_eq!(engine.username(), "alice%2Fname");
+        assert!(ProxyConfig::Http(proxy.clone()).engine_unsupported().is_none());
         let debug = format!("{proxy:?} {:?}", ProxyConfig::Http(proxy.clone()));
         assert!(!debug.contains("alice"));
         assert!(!debug.contains("secret"));

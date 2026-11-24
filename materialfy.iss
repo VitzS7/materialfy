@@ -58,15 +58,18 @@ MinVersion=10.0.17763
 ShowLanguageDialog=auto
 
 [Languages]
-; English is the default (first) language, Russian is the second one
+; English is the default (first) language, then Russian and Brazilian Portuguese
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
+Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
 
 [CustomMessages]
 english.StartupGroup=Autostart:
 english.StartupTask=Start %1 when Windows starts
 russian.StartupGroup=Автозапуск:
 russian.StartupTask=Запускать %1 при старте Windows
+brazilianportuguese.StartupGroup=Inicializar com o Windows:
+brazilianportuguese.StartupTask=Iniciar %1 quando o Windows iniciar
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}";            GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce

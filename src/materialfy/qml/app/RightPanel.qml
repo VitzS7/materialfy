@@ -50,7 +50,7 @@ Surface {
                 anchors.fill: parent
                 anchors.bottomMargin: 16
                 visible: root.tab === "lyrics" && Settings.rightPanelOpen
-                fontSize: 22
+                baseFontSize: 22
                 anchorPos: 0.3
             }
             // загружается при первом открытии вкладки

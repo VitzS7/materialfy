@@ -36,6 +36,7 @@ pub mod qobject {
         #[qobject]
         #[qproperty(QString, search_state, cxx_name = "searchState", READ, NOTIFY = search_changed)]
         #[qproperty(QString, search_query, cxx_name = "searchQuery", READ, NOTIFY = search_changed)]
+        #[qproperty(QString, search_kind, cxx_name = "searchKind", READ, NOTIFY = search_changed)]
         #[qproperty(QMap_QString_QVariant, best, READ, NOTIFY = search_changed)]
         #[qproperty(QMap_QString_QVariant, totals, READ, NOTIFY = search_changed)]
         #[qproperty(*mut QObject, search_tracks, cxx_name = "searchTracks", READ = search_tracks_ptr, CONSTANT)]
@@ -80,6 +81,10 @@ pub mod qobject {
         #[qsignal]
         #[cxx_name = "trackDetailsReady"]
         fn track_details_ready(self: Pin<&mut Catalog>, track_id: QString, details: QMap_QString_QVariant);
+        /// ответ на requestCanvas: id трека и ссылка на видео ("" — Canvas нет)
+        #[qsignal]
+        #[cxx_name = "canvasReady"]
+        fn canvas_ready(self: Pin<&mut Catalog>, track_id: QString, url: QString);
 
         #[qinvokable]
         #[cxx_name = "openArtist"]
@@ -158,6 +163,10 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "requestTrackDetails"]
         fn request_track_details(self: Pin<&mut Catalog>, track: &QMap_QString_QVariant);
+        /// Canvas трека (зацикленное видео вместо обложки) → canvasReady.
+        #[qinvokable]
+        #[cxx_name = "requestCanvas"]
+        fn request_canvas(self: Pin<&mut Catalog>, track_id: &QString);
     }
 
     impl cxx_qt::Threading for Catalog {}
@@ -235,6 +244,7 @@ pub struct CatalogRust {
     // поиск
     search_state: QString,
     search_query: QString,
+    search_kind: QString,
     best: QVariantMap,
     totals: QVariantMap,
     query: String,
@@ -262,6 +272,7 @@ impl Default for CatalogRust {
             nav: 0,
             search_state: QString::from("idle"),
             search_query: QString::default(),
+            search_kind: QString::from(SearchKind::All.name()),
             best: QVariantMap::default(),
             totals: QVariantMap::default(),
             query: String::new(),
@@ -436,7 +447,7 @@ impl qobject::Catalog {
         let Some(uri) = sf_api::link::parse(text) else { return false };
         if let Some(query) = sf_api::link::search_query(&uri) {
             self.as_mut().search_all(&QString::from(query.as_str()));
-            self.navigate("search", QVariantMap::default());
+            self.navigate("search", props(&[("initialQuery", Value::from(query))]));
             return true;
         }
         let (Some(kind), Some(id)) = (sf_api::util::uri_kind(&uri), sf_api::util::uri_id(&uri)) else { return false };
@@ -444,6 +455,11 @@ impl qobject::Catalog {
         match kind {
             "artist" => self.open_artist(&id),
             "album" => self.open_album(&id),
+            // DJ выглядит плейлистом, но списка треков у него нет: ссылка на него только запускает его
+            "playlist" if uri == sf_services::data::home_feed::DJ_URI => {
+                let context = PlayContext::with_uri("playlist", uri.clone());
+                ctx().services.player.play_context(context, None, None);
+            }
             "playlist" => {
                 let pairs = [
                     ("playlistId", Value::from(id.to_string())),
@@ -604,6 +620,7 @@ impl qobject::Catalog {
         let mut this = self.as_mut().rust_mut();
         this.query = query.clone();
         this.search_query = QString::from(query.as_str());
+        this.search_kind = QString::from(kind.name());
         this.kind = kind;
         this.generation += 1;
         let generation = this.generation;
@@ -755,6 +772,19 @@ impl qobject::Catalog {
                 };
                 catalog.track_details_ready(QString::from(track_id.as_str()), details);
             });
+        });
+    }
+
+    fn request_canvas(self: Pin<&mut Self>, track_id: &QString) {
+        let track_id = track_id.to_string();
+        if track_id.is_empty() || !signed_in() {
+            return;
+        }
+        let thread = self.qt_thread();
+        let catalog = ctx().services.catalog.clone();
+        ctx().rt.spawn(async move {
+            let url = catalog.canvas(&track_id).await.unwrap_or_default();
+            let _ = thread.queue(move |catalog| catalog.canvas_ready(QString::from(track_id.as_str()), QString::from(url.as_str())));
         });
     }
 

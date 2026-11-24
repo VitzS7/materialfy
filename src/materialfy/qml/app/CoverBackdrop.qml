@@ -73,9 +73,25 @@ Item {
         }
     }
 
+    // Статичный фон без «плавания»: та же крошечная копия (img._side px), растянутая билинейно —
+    // почти тот же мягкий градиент, что в шейдере, но без полноэкранного прохода в каждом кадре.
+    // Декод offscreen (sourceSize + asynchronous): полноразмерная обложка в GUI-потоке — фриз.
+    Image {
+        id: staticImg
+        anchors.fill: parent
+        source: img.source
+        sourceSize: Qt.size(root._side, root._side)
+        asynchronous: true
+        visible: !root._palette && staticImg.status === Image.Ready && root.ready && !root._flowing
+        fillMode: Image.PreserveAspectCrop
+        smooth: true
+    }
+
     ShaderEffect {
         anchors.fill: parent
-        visible: root.ready
+        // Без «плавания» шейдер не нужен: он каждый кадр семплирует и смешивает всю площадь окна.
+        // Статичная копия обложки (та же кубическая интерполяция блюра) дешевле на порядки.
+        visible: root.ready && (root._palette || root._flowing)
         property var source: root._palette ? swatches : img
         property real time: root._t
         property real amp: root._flowing ? 0.08 * root._blur : 0
@@ -92,6 +108,15 @@ Item {
 
     TickAnimation {
         running: root.running && root._flowing && root.ready && !Theme.quiet
-        onTriggered: root._t += frameTime * (0.15 + 0.85 * Math.min(1, root.flow))
+        // обновляем шейдер только когда _t реально сдвинулся: движение еле заметное,
+        // а каждый кадр униформы — перерисовка всей площади окна; так — ~8 Гц вместо 30
+        property real _acc: 0
+        onTriggered: {
+            _acc += frameTime * (0.15 + 0.85 * Math.min(1, root.flow))
+            if (_acc >= 0.002) {
+                root._t += _acc
+                _acc = 0
+            }
+        }
     }
 }

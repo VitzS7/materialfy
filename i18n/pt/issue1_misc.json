@@ -1,0 +1,19 @@
+{
+  "Devices": "Dispositivos",
+  "Looking for devices…": "Procurando dispositivos…",
+  "Redirect URI": "Redirect URI",
+  "Copy it into Redirect URIs of your app on developer.spotify.com exactly as shown, then paste the app's Client ID above.": "Copie exatamente como mostrado para Redirect URIs do seu app em developer.spotify.com e depois cole o Client ID do app acima.",
+  "Your library": "Sua biblioteca",
+  "Music plays here and this computer shows up in Spotify Connect.": "A música toca aqui e este computador aparece no Spotify Connect.",
+  "Control playback on your phone or speakers from here.": "Controle a reprodução no seu celular ou nas caixas de som daqui.",
+  "Open spotify.com": "Abrir spotify.com",
+  "Weak computer mode": "Modo para computador fraco",
+  "No background motion, shimmer, theme wipe or cover fades, minimal transitions": "Sem movimento de fundo, cintilância, transição de tema ou aparecimento de capas, transições mínimas",
+  "All effects, even when graphics are drawn by the processor": "Todos os efeitos, mesmo quando os gráficos são desenhados pelo processador",
+  "On by itself: graphics are drawn by the processor, without the video card": "Ligou sozinho: os gráficos são desenhados pelo processador, sem a placa de vídeo",
+  "Turns on by itself when graphics are drawn by the processor": "Liga sozinho quando os gráficos são desenhados pelo processador",
+  "Auto": "Automático",
+  "On": "Ativado",
+  "Materialfy closed unexpectedly last time": "O Materialfy fechou inesperadamente da última vez",
+  "Report": "Relatar"
+}

@@ -11,6 +11,7 @@ Page {
     title: I18n.t("Search")
     showHeader: false
 
+    property string initialQuery: Catalog.searchQuery
     property int filter: 0
     readonly property var filters: [
         { text: I18n.t("All"), type: "all" }, { text: I18n.t("Tracks"), type: "tracks" }, { text: I18n.t("Albums"), type: "albums" },
@@ -32,17 +33,22 @@ Page {
         return I18n.nCompact(n, "{0} follower", "{0} followers")
     }
     function focusSearch() { field.inputItem.forceActiveFocus() }
-    // запрос уже запущен снаружи (Catalog.openUri("spotify:search:…")): только показать его
+    // Catalog has already started the search before opening the page.
+    property bool _showingQuery: false
     function showQuery(q) {
-        if (q === "" || q === field.text)
+        if (q === "")
             return
+        _showingQuery = true
         filter = 0
         field.text = q
         debounce.stop()
+        _showingQuery = false
     }
     Component.onCompleted: {
-        showQuery(Catalog.searchQuery)
-        Qt.callLater(focusSearch)
+        showQuery(initialQuery)
+        // телефон: клавиатура — только по касанию поля, а не при каждом входе в раздел
+        if (!Theme.mobile)
+            Qt.callLater(focusSearch)
     }
 
     Timer {
@@ -50,7 +56,7 @@ Page {
         interval: 350
         onTriggered: Catalog.search(field.text, page.type)
     }
-    onTypeChanged: if (field.text.trim() !== "") Catalog.search(field.text, page.type)
+    onTypeChanged: if (!_showingQuery && field.text.trim() !== "") Catalog.search(field.text, page.type)
 
     SearchField {
         id: field
@@ -59,8 +65,9 @@ Page {
         Layout.alignment: Qt.AlignHCenter
         Layout.topMargin: 8
         implicitHeight: 56
-        placeholder: I18n.t("Track, album, artist, playlist or podcast")
-        onTextChanged: debounce.restart()
+        // телефон: коротко — длинная подсказка не помещается в поле
+        placeholder: Theme.mobile ? I18n.t("Search") : I18n.t("Track, album, artist, playlist or podcast")
+        onTextChanged: if (!page._showingQuery) debounce.restart()
         // Enter — искать сразу, не дожидаясь паузы ввода; Esc — очистить поле
         onAccepted: {
             debounce.stop()

@@ -83,6 +83,11 @@ pub fn liked_cache_file(account_id: &str) -> PathBuf {
     cache_subdir("liked").join(format!("{}.json", safe_name(account_id)))
 }
 
+/// Кэш полок главной аккаунта: cache_dir()/home/<account>.json.
+pub fn home_cache_file(account_id: &str) -> PathBuf {
+    cache_subdir("home").join(format!("{}.json", safe_name(account_id)))
+}
+
 /// Кэш строк плейлистов аккаунта: cache_dir()/playlists/<account>/.
 pub fn playlist_cache_dir(account_id: &str) -> PathBuf {
     cache_subdir("playlists").join(safe_name(account_id))

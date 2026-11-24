@@ -29,11 +29,12 @@ pub enum Slot {
     Personal,
     Playback,
     Proxy,
+    Musixmatch,
 }
 
 impl Slot {
     pub const SPOTIFY: [Self; 3] = [Self::Shared, Self::Personal, Self::Playback];
-    pub const ALL: [Self; 4] = [Self::Shared, Self::Personal, Self::Playback, Self::Proxy];
+    pub const ALL: [Self; 5] = [Self::Shared, Self::Personal, Self::Playback, Self::Proxy, Self::Musixmatch];
 
     fn index(self) -> usize {
         self as usize
@@ -45,6 +46,7 @@ impl Slot {
             Self::Personal => "personal-web",
             Self::Playback => "playback",
             Self::Proxy => "proxy-password",
+            Self::Musixmatch => "musixmatch-token",
         }
     }
 }
@@ -55,6 +57,8 @@ pub enum Grant {
     Web(StoredToken),
     Playback(Credentials),
     Proxy(ProxyPassword),
+    /// личный usertoken Musixmatch (Settings → «Тексты»)
+    Musixmatch(String),
 }
 
 impl Grant {
@@ -66,6 +70,7 @@ impl Grant {
                 credentials.username.as_deref().is_some_and(|name| !name.is_empty()) && !credentials.auth_data.is_empty()
             }
             (Slot::Proxy, Self::Proxy(password)) => password.valid(),
+            (Slot::Musixmatch, Self::Musixmatch(token)) => !token.trim().is_empty(),
             _ => false,
         }
     }
@@ -156,6 +161,7 @@ impl Error {
 pub type StoreFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type Request<T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send>>;
 
+#[cfg(not(target_os = "android"))]
 fn native_error(error: keyring_core::Error) -> Error {
     // текст ошибок провайдера может содержать секрет — наружу не передаём
     match error {
@@ -170,11 +176,13 @@ trait ProtectedStore: Send {
     fn delete(&mut self, key: &str) -> Result<(), Error>;
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Default)]
 struct NativeStore {
     store: Option<Arc<keyring_core::api::CredentialStore>>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl NativeStore {
     fn entry(&mut self, key: &str) -> Result<keyring_core::Entry, Error> {
         if self.store.is_none() {
@@ -193,6 +201,7 @@ impl NativeStore {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl ProtectedStore for NativeStore {
     fn read(&mut self, key: &str) -> Result<Option<Vec<u8>>, Error> {
         match self.entry(key)?.get_secret() {
@@ -210,6 +219,68 @@ impl ProtectedStore for NativeStore {
         match self.entry(key)?.delete_credential() {
             Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(error) => Err(native_error(error)),
+        }
+    }
+}
+
+/// Android: системного keyring для нативного кода нет. Секреты лежат файлами в приватном каталоге приложения
+/// ($HOME = Context.getFilesDir(), mode 0600): другие приложения его не видят, резервное копирование
+/// выключено в манифесте (allowBackup=false). Имя файла — SHA-256 ключа, без самого ключа.
+#[cfg(target_os = "android")]
+#[derive(Default)]
+struct NativeStore;
+
+#[cfg(target_os = "android")]
+impl NativeStore {
+    fn path(key: &str) -> Result<PathBuf, Error> {
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).ok_or(Error::Unavailable)?;
+        let dir = PathBuf::from(home).join(".secrets");
+        if !dir.is_dir() {
+            std::fs::create_dir_all(&dir).map_err(|_| Error::Unavailable)?;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let name = hex_digest(key.as_bytes());
+        Ok(dir.join(name))
+    }
+}
+
+#[cfg(target_os = "android")]
+fn hex_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(target_os = "android")]
+impl ProtectedStore for NativeStore {
+    fn read(&mut self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        match std::fs::read(Self::path(key)?) {
+            Ok(secret) => Ok(Some(secret)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(Error::Locked),
+        }
+    }
+
+    fn write(&mut self, key: &str, secret: &[u8]) -> Result<(), Error> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = Self::path(key)?;
+        let tmp = path.with_extension("tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|_| Error::Unavailable)?;
+        file.write_all(secret).and_then(|()| file.sync_all()).map_err(|_| Error::Unavailable)?;
+        std::fs::rename(&tmp, &path).map_err(|_| Error::Unavailable)
+    }
+
+    fn delete(&mut self, key: &str) -> Result<(), Error> {
+        match std::fs::remove_file(Self::path(key)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(Error::Locked),
         }
     }
 }
@@ -240,7 +311,7 @@ type Job = Box<dyn FnOnce(&mut dyn ProtectedStore) + Send>;
 struct Inner {
     state_dir: PathBuf,
     profile: String,
-    generations: [AtomicU64; 4],
+    generations: [AtomicU64; 5],
     // только вокруг крошечных файлов-маркеров, никогда вокруг вызова хранилища ОС
     markers: Mutex<()>,
     jobs: mpsc::SyncSender<Job>,

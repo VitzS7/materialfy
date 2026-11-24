@@ -9,6 +9,7 @@ import ".."
 // из Snackbar («Вернуть» / «Отменить»).
 TrackListPage {
     id: page
+    smartShuffleButton: true
 
     property string playlistId
     property string playlistTitle
@@ -21,8 +22,6 @@ TrackListPage {
         info = playlistId !== "" ? Library.playlistInfo(playlistId) : ({})
         _rev++
     }
-    Component.onCompleted: _reload()
-    onPlaylistIdChanged: _reload()
     Connections {
         target: Library
         function onPlaylistInfoChanged(id) { if (id === page.playlistId) page._reload() }
@@ -33,21 +32,74 @@ TrackListPage {
     readonly property bool canEdit: _rev >= 0 && playlistId !== "" && Library.canEdit(playlistId)
     readonly property bool own: (info.ownerId ?? "") !== "" && info.ownerId === myId
     readonly property bool collaborative: info.collaborative === true
+    readonly property bool blend: info.blend === true
     readonly property string uri: (info.uri ?? "") !== "" ? info.uri : (playlistId !== "" ? "spotify:playlist:" + playlistId : "")
     property bool panelOpen: false
     readonly property bool compactPanel: width < 760
 
     title: (info.title ?? "") !== "" ? info.title : playlistTitle
-    overline: collaborative ? I18n.t("COLLABORATIVE PLAYLIST") : I18n.t("PLAYLIST")
+    overline: blend ? I18n.t("BLEND") : collaborative ? I18n.t("COLLABORATIVE PLAYLIST") : I18n.t("PLAYLIST")
     description: info.description ?? ""
     heroImage: (info.cover ?? "") !== "" ? info.cover : cover
-    model: playlistId !== "" ? Library.playlistTracks(playlistId) : null
+    // Модель треков: стабильный экземпляр по id + счётчик владельцев у моста. playlistTracks зовём
+    // один раз на открытие (guard _acquiredId — повторные оценки binding'ов счётчик не надувают),
+    // releasePlaylist — на скрытие (Router прячет ушедшую страницу), смену id и уничтожение:
+    // последний release отменяет идущее чтение; возврат на страницу перечитывает кэш кусками.
+    // Шапка (playlistInfo) независима и не releasing'ся.
+    property string _acquiredId: ""
+    // Скрытие страницы (Router прячет на каждом push, сцена — в мини-режиме) снимает владение:
+    // идущее чтение отменяется, но модель и строки остаются — «назад» не пересоздаёт список
+    // во время анимации и сохраняет прокрутку. Модель обнуляется при смене id и уничтожении.
+    function _syncModel() {
+        if (playlistId === _acquiredId)
+            return
+        _releaseModel()
+        if (playlistId !== "" && visible) {
+            _acquiredId = playlistId
+            model = Library.playlistTracks(playlistId)
+        }
+    }
+    function _releaseOwnership() {
+        if (_acquiredId === "")
+            return
+        Library.releasePlaylist(_acquiredId)
+        _acquiredId = ""
+    }
+    function _releaseModel() {
+        _releaseOwnership()
+        model = null
+    }
+    Component.onCompleted: { _reload(); _syncModel() }
+    onPlaylistIdChanged: { _reload(); _syncModel() }
+    onVisibleChanged: {
+        if (visible)
+            _syncModel()
+        else
+            _releaseOwnership()
+    }
+    Component.onDestruction: _releaseModel()
     emptyIcon: "queue_music"
     emptyTitle: I18n.t("This playlist has no tracks")
     emptyText: canEdit ? I18n.t("Tap “Edit playlist” to add tracks") : ""
-    addedColumn: collaborative ? "by" : (model && model.count > 0 && (model.get(0).addedAt ?? "") !== "" ? "at" : "")
+    addedColumn: collaborative || blend ? "by" : (model && model.count > 0 && (model.get(0).addedAt ?? "") !== "" ? "at" : "")
     contentRightInset: editing && panelOpen && !compactPanel ? addPanel.panelWidth + 8 : 0
     onEditingChanged: if (!editing) panelOpen = false
+    // «Назад» системы (телефон): панель добавления → правка → поиск по списку
+    function handleBack() {
+        if (panelOpen) {
+            panelOpen = false
+            return true
+        }
+        if (editing) {
+            editing = false
+            return true
+        }
+        if (searchOpen) {
+            closeSearch()
+            return true
+        }
+        return false
+    }
     onCanEditChanged: if (!canEdit) editing = false
 
     function notify(text, actionText, onAction) {
@@ -124,7 +176,7 @@ TrackListPage {
             visible: (page.info.owner ?? "") !== ""
             spacing: 8
             height: 28
-            Avatar { size: 24; name: page.info.owner ?? "" }
+            Avatar { size: 24; name: page.info.owner ?? ""; source: page.own ? (Auth.account.avatar ?? "") : "" }
             Label {
                 text: (page.info.owner ?? "") + (page.own ? I18n.t(" (you)") : "")
                 type: "titleSmall"
@@ -169,9 +221,11 @@ TrackListPage {
         }
     }
 
+    // телефон: радио и «поделиться» — в меню «ещё», кнопки поменьше: иначе ряд шапки переносился на две строки
     headerExtra: Row {
         spacing: 4
         IconButton {
+            visible: !Theme.mobile
             icon: "radio"
             size: "m"
             // станции идут через сессию воспроизведения (как «Радио исполнителя»)
@@ -184,7 +238,7 @@ TrackListPage {
         IconButton {
             visible: page.canEdit
             icon: "edit"
-            size: "m"
+            size: Theme.mobile ? "s" : "m"
             onClicked: page.editing = true
         }
         IconButton {
@@ -194,7 +248,7 @@ TrackListPage {
             Accessible.name: followed ? I18n.t("Following") : I18n.t("Follow")
             icon: followed ? "library_add_check" : "library_add"
             style: followed ? "tonal" : "standard"
-            size: "m"
+            size: Theme.mobile ? "s" : "m"
             checkable: true
             autoToggle: false
             checked: followed
@@ -208,6 +262,7 @@ TrackListPage {
             }
         }
         IconButton {
+            visible: !Theme.mobile
             icon: "share"
             size: "m"
             enabled: page.uri !== ""
@@ -218,8 +273,8 @@ TrackListPage {
         }
         IconButton {
             id: moreButton
-            icon: "more_horiz"
-            size: "m"
+            icon: Theme.mobile ? "more_vert" : "more_horiz"
+            size: Theme.mobile ? "s" : "m"
             onClicked: {
                 const p = moreButton.mapToItem(plMenu, 0, moreButton.height)
                 plMenu.open(page._menuItems(), p)
@@ -295,11 +350,15 @@ TrackListPage {
 
     // ---- Меню «⋯» ----
     function _menuItems() {
-        const items = [
+        const items = Theme.mobile ? [
+            { id: "radio", text: I18n.t("Playlist radio"), icon: "radio", enabled: page.uri !== "" && !Radio.locked },
+            { id: "share", text: I18n.t("Copy link"), icon: "share", enabled: page.uri !== "" },
+            { separator: true }
+        ] : []
+        items.push(
             { id: "queue", text: I18n.t("Add to queue"), icon: "add_to_queue", enabled: page.uri !== "" },
             { id: "pin", text: (Library.pinsRevision >= 0 && Library.isPinned(page.uri)) ? I18n.t("Unpin") : I18n.t("Pin in library"),
-              icon: "push_pin" }
-        ]
+              icon: "push_pin" })
         if (page.canEdit)
             items.push({ id: "edit", text: I18n.t("Edit playlist"), icon: "edit" })
         if (page.own)
@@ -312,8 +371,15 @@ TrackListPage {
         id: plMenu
         anchors.fill: parent
         z: 50
+        header: ({ title: page.title, subtitle: I18n.t("Playlist"), image: page.heroImage })
         onTriggered: (id, item) => {
-            if (id === "queue") {
+            if (id === "radio") {
+                Radio.playStation(page.uri, page.title)
+                page.notify(I18n.t("Playlist radio: “{0}”", page.title))
+            } else if (id === "share") {
+                Catalog.copyLink(Catalog.uriUrl(page.uri))
+                page.notify(I18n.t("Link copied"))
+            } else if (id === "queue") {
                 Player.addUriToQueue(page.uri)
                 page.notify(I18n.t("Playlist added to queue"))
             } else if (id === "pin") {
@@ -334,8 +400,10 @@ TrackListPage {
 
     AddTracksPanel {
         id: addPanel
+        // телефон: лист поверх всего окна (над мини-плеером и нижней навигацией)
+        parent: Theme.mobile && page.Window.window ? page.Window.window.contentItem : page
         anchors.fill: parent
-        z: 20
+        z: Theme.mobile ? 1500 : 20
         playlistId: page.playlistId
         playlistTitle: page.title
         playlistModel: page.model

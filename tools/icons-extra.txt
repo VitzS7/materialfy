@@ -6,6 +6,7 @@ add_to_queue
 arrow_back
 arrow_downward
 arrow_drop_down
+arrow_upward
 autoplay
 bedtime
 block
@@ -44,6 +45,7 @@ grid_view
 group
 groups
 headphones
+help
 high_quality
 home
 info
@@ -146,3 +148,8 @@ radio_button_checked
 person_off
 wifi
 wifi_off
+crop_16_9
+keyboard
+mouse
+sensors
+touch_app

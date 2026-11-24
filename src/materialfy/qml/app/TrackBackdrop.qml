@@ -22,6 +22,11 @@ Item {
     readonly property var _layers: [a, b]
     readonly property var _back: _layers[1 - _front]
 
+    // Полупрозрачный фон (атмосферная подложка окна): opacity в Qt Quick ложится на каждый слой отдельно,
+    // и пока новая обложка проявляется поверх старой, они складываются — фон светлеет, а в конце перехода
+    // резко темнеет. На время перехода — общий слой, прозрачность на двоих одна
+    layer.enabled: fade.running && opacity < 1
+
     onSourceChanged: {
         _settle()
         _back.source = source

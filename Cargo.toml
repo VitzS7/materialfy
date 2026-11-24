@@ -15,7 +15,7 @@ members = [
 
 [workspace.package]
 description = "Materialfy — клиент Spotify на Qt Quick (Material 3 Expressive) и Rust"
-version = "0.3.3"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-3.0-or-later"
@@ -115,13 +115,13 @@ hyper-proxy2 = { git = "https://github.com/crmne/hyper-proxy2", rev = "efca48113
 # librespot dev (после 0.8.0) + патчи Spotifast (normalisation_report, восстановление сессии, креды в памяти,
 # диапазон плейлиста, таймауты AP, стоп при отказе в ключе): ветка materialfy в github.com/fatyzzz/librespot.
 # Все крейты — из одного rev; librespot-oauth нужен как транзитивная зависимость librespot-core.
-librespot-audio = { git = "https://github.com/fatyzzz/librespot", rev = "ea38c16ddbe987b5e2c10e8bd6c2b1d7b4b5ea3e" }
-librespot-connect = { git = "https://github.com/fatyzzz/librespot", rev = "ea38c16ddbe987b5e2c10e8bd6c2b1d7b4b5ea3e" }
-librespot-core = { git = "https://github.com/fatyzzz/librespot", rev = "ea38c16ddbe987b5e2c10e8bd6c2b1d7b4b5ea3e" }
-librespot-metadata = { git = "https://github.com/fatyzzz/librespot", rev = "ea38c16ddbe987b5e2c10e8bd6c2b1d7b4b5ea3e" }
-librespot-oauth = { git = "https://github.com/fatyzzz/librespot", rev = "ea38c16ddbe987b5e2c10e8bd6c2b1d7b4b5ea3e" }
-librespot-playback = { git = "https://github.com/fatyzzz/librespot", rev = "ea38c16ddbe987b5e2c10e8bd6c2b1d7b4b5ea3e" }
-librespot-protocol = { git = "https://github.com/fatyzzz/librespot", rev = "ea38c16ddbe987b5e2c10e8bd6c2b1d7b4b5ea3e" }
+librespot-audio = { git = "https://github.com/fatyzzz/librespot", rev = "2e11919ca0ab2aec377940e3a4aadaf2aa4a8367" }
+librespot-connect = { git = "https://github.com/fatyzzz/librespot", rev = "2e11919ca0ab2aec377940e3a4aadaf2aa4a8367" }
+librespot-core = { git = "https://github.com/fatyzzz/librespot", rev = "2e11919ca0ab2aec377940e3a4aadaf2aa4a8367" }
+librespot-metadata = { git = "https://github.com/fatyzzz/librespot", rev = "2e11919ca0ab2aec377940e3a4aadaf2aa4a8367" }
+librespot-oauth = { git = "https://github.com/fatyzzz/librespot", rev = "2e11919ca0ab2aec377940e3a4aadaf2aa4a8367" }
+librespot-playback = { git = "https://github.com/fatyzzz/librespot", rev = "2e11919ca0ab2aec377940e3a4aadaf2aa4a8367" }
+librespot-protocol = { git = "https://github.com/fatyzzz/librespot", rev = "2e11919ca0ab2aec377940e3a4aadaf2aa4a8367" }
 
 # Декодирование аудио на opt-level 0 слишком медленное; сам бинарник остаётся инкрементальным.
 [profile.dev.package."*"]

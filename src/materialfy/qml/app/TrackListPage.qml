@@ -34,6 +34,8 @@ Item {
     property var heroShape: "cookie9"
     property var heroArtistRefs: []            // исполнители-ссылки под названием (альбом)
     property bool showPlayButtons: true
+    // кнопка «Smart Shuffle» рядом с «Перемешать» (плейлисты)
+    property bool smartShuffleButton: false
     readonly property bool scrolled: list.contentY - list.originY > 48
 
     // Правка плейлиста
@@ -42,12 +44,15 @@ Item {
     property string addedColumn                // "" / "by" / "at" — колонка «Добавил»/«Добавлено»
     property bool showPlays: false             // колонка прослушиваний (альбом)
     property bool showAlbum: true              // колонка альбома (на странице альбома не нужна)
+    property bool rowCovers: true              // обложки в строках (у альбома на телефоне — номер вместо одинаковых обложек)
     property real contentRightInset: 0         // место справа под боковую панель (AddTracksPanel)
     Behavior on contentRightInset { enabled: Theme.reducedMotion !== true; NumberAnimation { duration: Theme.motion.spatialDefault; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.motion.emphasizedDecelerate } }
     readonly property alias listView: list
 
     property bool searchOpen: false
     property string searchText
+    // запрос уходит в фильтр с задержкой: полный сброс модели на каждый символ дороги
+    onSearchTextChanged: searchDebounce.restart()
     readonly property var shownModel: model ? filter : null   // то, что в списке: всё или найденное
 
     signal trackActivated(int row)
@@ -110,11 +115,23 @@ Item {
         searchOpen = false
         searchText = ""
     }
+    // «Назад» системы (телефон): сначала закрыть поиск по списку; true — обработано здесь
+    function handleBack() {
+        if (!searchOpen)
+            return false
+        closeSearch()
+        return true
+    }
 
     TrackFilter {
         id: filter
         source: page.model
-        query: page.searchText
+        // query ставит searchDebounce: привязка к page.searchText сбрасывала модель на каждый символ
+    }
+    Timer {
+        id: searchDebounce
+        interval: 200
+        onTriggered: filter.query = page.searchText
     }
 
     function _duration(ms) {
@@ -132,7 +149,8 @@ Item {
 
     HeroShapes {
         width: page.width - page.contentRightInset
-        active: page.showHeader && page.visible && Theme.reducedMotion !== true
+        // телефон: на узком экране фигуры за крупной обложкой — серое пятно, а не фон
+        active: page.showHeader && page.visible && Theme.reducedMotion !== true && !Theme.mobile
         running: page._settled
         headerHeight: list.headerItem ? list.headerItem.height : 320
         scroll: list.contentY - list.originY
@@ -144,12 +162,12 @@ Item {
     ReorderListView {
         id: list
         anchors.fill: parent
-        anchors.leftMargin: 16
-        anchors.rightMargin: 16 + page.contentRightInset
+        anchors.leftMargin: Theme.mobile ? 8 : 16
+        anchors.rightMargin: (Theme.mobile ? 8 : 16) + page.contentRightInset
         model: page.shownModel
         clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        acceptedButtons: Qt.NoButton
+        boundsBehavior: Theme.mobile ? Flickable.OvershootBounds : Flickable.StopAtBounds
+        acceptedButtons: Theme.mobile ? Qt.LeftButton : Qt.NoButton
         reuseItems: true
         cacheBuffer: 640
         reorderable: page.editing && !filter.active
@@ -188,9 +206,9 @@ Item {
             Loader {
                 id: heroLoader
                 visible: page.showHeader
-                x: 16
+                x: Theme.mobile ? 8 : 16
                 y: 24     // запас сверху: фигура за обложкой больше неё и не должна упираться в край списка
-                width: parent.width - 32
+                width: parent.width - 2 * x
                 sourceComponent: page.editing && page.editHero ? page.editHero : defaultHero
             }
         }
@@ -209,6 +227,7 @@ Item {
             albumId: model.albumId
             album: model.album
             cover: model.cover
+            showCover: page.rowCovers
             coverLarge: model.coverLarge ?? ""
             uri: model.uri ?? ""
             isEpisode: model.isEpisode ?? false
@@ -227,8 +246,10 @@ Item {
             liked: Library.likesRevision >= 0 && Library.isLiked(model.trackId)
             current: model.trackId === Player.trackId
             highlighted: (page._flashId !== "" && model.trackId === page._flashId) || page._flashRow === index
-            // pos — позиция в самом списке (для «Убрать из этого плейлиста»); при поиске неизвестна
-            track: filter.active ? page.shownModel.get(index) : Object.assign({}, page.shownModel.get(index), { pos: index })
+            // pos — позиция в самом списке (для «Убрать из этого плейлиста»); при поиске неизвестна.
+            // Словарь для меню TrackRow собирает сам, лениво (trackData()) — get(index) целиком
+            // (18 ролей в QVariantMap на каждую строку) здесь больше не нужен
+            pos: filter.active ? -1 : index
             z: dragging ? 10 : 0
             transform: Translate {
                 y: row.dragging ? list.dragOffset : list.shiftFor(row.index)
@@ -251,7 +272,7 @@ Item {
         footer: Item {
             id: footerBox
             width: list.width
-            height: 120 + (page.model && page.model.loading && page.model.count > 0 ? 64 : 0) + extraLoader.height
+            height: (Theme.mobile ? 96 : 120) + (page.model && page.model.loading && page.model.count > 0 ? 64 : 0) + extraLoader.height
             Loader {
                 id: extraLoader
                 width: parent.width
@@ -273,7 +294,8 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
                 visible: filter.active && filter.count === 0 && !(page.model && page.model.loading)
-                text: I18n.t("Nothing in this list matches “{0}”", page.searchText.trim())
+                // цитируем filter.query, а не searchText: текст должен совпадать с тем, что реально отражает список
+                text: I18n.t("Nothing in this list matches “{0}”", filter.query.trim())
                 type: "bodyLarge"
                 color: Theme.fgSurfaceVariant
             }
@@ -284,18 +306,24 @@ Item {
 
     Component {
         id: defaultHero
-        RowLayout {
+        // Телефон: обложка крупно по центру, под ней подписи и кнопки; десктоп — обложка слева от подписей
+        GridLayout {
             id: hero
             readonly property alias searchField: searchField
-            spacing: page.width < 560 ? 18 : 28
-            Behavior on spacing { NumberAnimation { duration: Theme.motion.spatialDefault; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.motion.emphasized } }
+            columns: Theme.mobile ? 1 : 2
+            rowSpacing: 20
+            columnSpacing: page.width < 560 ? 18 : 28
+            Behavior on columnSpacing { NumberAnimation { duration: Theme.motion.spatialDefault; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.motion.emphasized } }
 
             // Обложка или фигура с иконкой; за обложкой — фигура побольше
             Item {
-                Layout.preferredWidth: page.width > 760 ? 184 : page.width < 560 ? 96 : 128
+                Layout.preferredWidth: Theme.mobile ? Math.round(Math.min(232, page.width * 0.56))
+                                     : page.width > 760 ? 184 : page.width < 560 ? 96 : 128
                 Layout.preferredHeight: Layout.preferredWidth
                 Behavior on Layout.preferredWidth { NumberAnimation { duration: Theme.motion.spatialDefault; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.motion.emphasized } }
-                Layout.alignment: Qt.AlignTop
+                Layout.alignment: Theme.mobile ? Qt.AlignHCenter : Qt.AlignTop
+                // фигура за обложкой на 30 % больше — ей нужно место сверху
+                Layout.topMargin: Theme.mobile ? 20 : 0
                 MorphShape {
                     id: coverBackdrop
                     visible: page.heroImage !== ""
@@ -334,7 +362,8 @@ Item {
 
             ColumnLayout {
                 Layout.fillWidth: true
-                Layout.alignment: Qt.AlignBottom
+                Layout.alignment: Theme.mobile ? Qt.AlignTop : Qt.AlignBottom
+                Layout.topMargin: Theme.mobile ? 8 : 0
                 spacing: 4
                 Label {
                     visible: page.overline !== ""
@@ -394,25 +423,54 @@ Item {
                 // в узком окне кнопки переносятся, а не распирают шапку
                 Flow {
                     Layout.fillWidth: true
-                    Layout.topMargin: 14
-                    spacing: 12
+                    Layout.topMargin: Theme.mobile ? 10 : 14
+                    spacing: Theme.mobile ? 8 : 12
                     visible: page.model !== null && (page.model.count > 0 || page.headerExtra !== null)
                     Button {
                         visible: page.showPlayButtons
                         text: I18n.t("Play")
                         icon: "play_arrow"
-                        size: "m"
+                        size: Theme.mobile ? "s" : "m"
                         enabled: page.shownModel !== null && page.shownModel.count > 0
                         onClicked: Player.playFrom(page.shownModel, 0)
                     }
                     Button {
-                        visible: page.showPlayButtons
+                        visible: page.showPlayButtons && !Theme.mobile
                         text: I18n.t("Shuffle play")
                         icon: "shuffle"
                         style: "tonal"
                         size: "m"
                         enabled: page.shownModel !== null && page.shownModel.count > 0
                         onClicked: Player.shuffleFrom(page.shownModel)
+                    }
+                    // телефон: перемешивание — круглой кнопкой, иначе «Сохранить» и поиск уезжали на вторую строку
+                    IconButton {
+                        visible: page.showPlayButtons && Theme.mobile
+                        Accessible.name: I18n.t("Shuffle play")
+                        icon: "shuffle"
+                        style: "tonal"
+                        size: "s"
+                        enabled: page.shownModel !== null && page.shownModel.count > 0
+                        onClicked: Player.shuffleFrom(page.shownModel)
+                    }
+                    // телефон: умное перемешивание — тоже круглой кнопкой
+                    IconButton {
+                        visible: page.showPlayButtons && page.smartShuffleButton && !Player.remote && Theme.mobile
+                        Accessible.name: I18n.t("Smart Shuffle")
+                        icon: "auto_awesome"
+                        style: "tonal"
+                        size: "s"
+                        enabled: page.shownModel !== null && page.shownModel.count > 0
+                        onClicked: Player.smartShuffleFrom(page.shownModel)
+                    }
+                    Button {
+                        visible: page.showPlayButtons && page.smartShuffleButton && !Player.remote && !Theme.mobile
+                        text: I18n.t("Smart Shuffle")
+                        icon: "auto_awesome"
+                        style: "tonal"
+                        size: "m"
+                        enabled: page.shownModel !== null && page.shownModel.count > 0
+                        onClicked: Player.smartShuffleFrom(page.shownModel)
                     }
                     Loader {
                         active: page.headerExtra !== null
@@ -421,7 +479,7 @@ Item {
                     IconButton {
                         visible: page.model !== null && page.model.count > 0
                         icon: "search"
-                        size: "m"
+                        size: Theme.mobile ? "s" : "m"
                         style: page.searchOpen ? "tonal" : "standard"
                         checkable: true
                         autoToggle: false
@@ -474,7 +532,7 @@ Item {
         anchors.horizontalCenterOffset: -page.contentRightInset / 2
         y: Math.max((list.headerItem ? list.headerItem.height - (list.contentY - list.originY) : 0) + 8,
                     (parent.height - implicitHeight) / 2)
-        width: Math.min(parent.width - 64 - page.contentRightInset, 420)
+        width: Math.min(parent.width - (Theme.mobile ? 32 : 64) - page.contentRightInset, 420)
         visible: page.model !== null && !page.model.loading && page.model.count === 0 && page.footerExtra === null
         icon: page.emptyIcon
         title: page.emptyTitle

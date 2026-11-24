@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Shapes
 import QtQuick.Templates as T
+import Materialfy.Core
 
 // Всплывающее меню MD3: карточка со списком пунктов у точки окна. Клик мимо или Esc — закрыть.
 // Меню — отдельное всплывающее окно (Popup.Window): выходит за края окна приложения (в мини-плеере
@@ -14,7 +15,15 @@ Item {
     id: root
 
     property var items: []
-    readonly property bool opened: mainPopup.visible
+    // телефон: шапка нижнего листа { title, subtitle, image } (см. SheetMenu.header)
+    property var header: null
+    readonly property bool opened: mainPopup.visible || (sheet.item !== null && sheet.item.opened)
+
+    onOpenedChanged: opened ? BackStack.push(root) : BackStack.pop(root)
+    Component.onDestruction: BackStack.pop(root)
+    // Отдельным окном (Popup.Window). На Wayland по умолчанию — нет (см. CardPopup); островок KDE просит да: его окно
+    // меньше меню, а где оно на экране, известно (окно ставит скрипт KWin)
+    property bool windowed: !Qt.platform.pluginName.startsWith("wayland")
 
     signal picked(int index)
     signal triggered(string id, var item)
@@ -26,10 +35,21 @@ Item {
     // под кнопкой, правым краем к её правому краю, а не влезает вниз — над ней. Без size меню открывается
     // от точки (курсор при ПКМ) вправо-вниз и отражается влево/вверх у края.
     function open(list, point, size) {
+        // телефон: нижний лист вместо карточки у точки
+        if (Theme.mobile) {
+            items = list
+            sheet.active = true
+            sheet.item.open(list)
+            return
+        }
         closeSub()
         items = list
         main.currentIndex = -1
         const g = root.mapToGlobal(point.x, point.y)
+        anchorBox.x = point.x
+        anchorBox.y = point.y
+        anchorBox.width = size ? Math.max(1, size.width) : 1
+        anchorBox.height = size ? Math.max(1, size.height) : 1
         mainPopup.anchor = Qt.rect(g.x, g.y, size ? size.width : 0, size ? size.height : 0)
         mainPopup.area = _screenArea(g)
         mainPopup.windowArea = _windowArea()
@@ -39,6 +59,32 @@ Item {
     function close() {
         closeSub()
         mainPopup.close()
+        if (sheet.item)
+            sheet.item.close()
+    }
+    // «назад» системы (телефон): подменю листа → родитель, иначе закрыть; false — меню не открыто
+    function back() {
+        if (sheet.item && sheet.item.opened)
+            return sheet.item.back()
+        if (mainPopup.visible) {
+            close()
+            return true
+        }
+        return false
+    }
+
+    // Лист — поверх всего окна, а не внутри владельца меню (поле выбора, строка)
+    Loader {
+        id: sheet
+        active: false
+        parent: root.Window.window ? root.Window.window.contentItem : root
+        anchors.fill: parent
+        z: 3000
+        sourceComponent: SheetMenu {
+            header: root.header
+            onPicked: index => root.picked(index)
+            onTriggered: (id, item) => root.triggered(id, item)
+        }
     }
     function closeSub() {
         hoverTimer.stop()
@@ -52,7 +98,7 @@ Item {
     function _screenArea(g) {
         // Wayland не сообщает, где на экране окно: mapToGlobal даёт координаты внутри окна, а геометрия
         // монитора — глобальная (второй монитор начинается не с нуля), и меню уезжало. Там граница — само окно.
-        if (Qt.platform.pluginName.startsWith("wayland"))
+        if (!root.windowed)
             return _windowArea()
         const w = root.Window.window
         let s = w ? w.screen : null
@@ -145,22 +191,29 @@ Item {
         }
     }
 
+    // Wayland, отдельным окном: Qt отдаёт композитору прямоугольник родителя попапа как «контрол», от которого меню
+    // встаёт и отражается (parentControlGeometry). Родитель — всё окно, и KWin ставил меню у его правого края;
+    // поэтому родитель — точка или кнопка, у которой открыли меню
+    Item { id: anchorBox; width: 1; height: 1 }
+
     // Всплывающее окно под одну карточку: прозрачное, с полем под тень; позиция — в глобальных координатах
     component CardPopup: T.Popup {
         id: pop
+        Component.onCompleted: MobileShell.prepareAccessibility(contentItem.parent, root)
         property rect area: Qt.rect(0, 0, 0, 0)
         property Item card: null
 
         // На Wayland — внутри окна: композитор сам двигает отдельные всплывающие окна, и меню оказывалось
         // не у кнопки. Границы там всё равно по окну (см. _screenArea).
-        popupType: Qt.platform.pluginName.startsWith("wayland") ? T.Popup.Item : T.Popup.Window
+        popupType: root.windowed ? T.Popup.Window : T.Popup.Item
         modal: false
         dim: false
         focus: true
         padding: root._pad
         background: null
-        // x/y попапа — относительно root; считаем в глобальных и переводим
-        function toLocal(gx, gy) { return root.mapFromGlobal(gx, gy) }
+        parent: root.windowed && Qt.platform.pluginName.startsWith("wayland") ? anchorBox : root
+        // x/y попапа — относительно его родителя; считаем в глобальных и переводим
+        function toLocal(gx, gy) { return parent.mapFromGlobal(gx, gy) }
 
         // размер окна — по карточке (неявный размер контейнера до Popup.Window не доходит)
         contentWidth: card ? card.implicitWidth : 0

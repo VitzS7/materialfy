@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl, QVariant};
 use tokio::sync::broadcast::error::RecvError;
-use mf_platform::SettingsStore;
+use mf_platform::{SettingKey, SettingsStore};
 use sf_services::{AppRequest, Services, ServicesOptions};
 
 use crate::cli::{Cli, InitialValue};
@@ -69,6 +69,156 @@ fn setup_env(cli: &Cli) {
                 std::env::set_var("QSG_RHI_BACKEND", backend);
             }
         }
+    }
+}
+
+/// Производитель дискретной видеокарты для настройки PRIME offload (только Linux).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum GpuVendor {
+    Nvidia,
+    Other,
+}
+
+/// Определяет наличие и производителя дискретной видеокарты через sysfs.
+/// На Linux признаком наличия нескольких GPU (гибридной графики) служит присутствие двух или более
+/// узлов рендеринга DRM (/dev/dri/renderD*). Производитель каждого узла считывается из
+/// /sys/class/drm/<node>/device/vendor (например, 0x10de — NVIDIA, 0x1002 — AMD, 0x8086 — Intel).
+/// При проприетарном драйвере NVIDIA без nvidia-drm.modeset=1 узел renderD* создаётся только для
+/// интегрированной графики; в этом случае о наличии NVIDIA свидетельствует модуль /sys/module/nvidia.
+fn discrete_gpu_vendor() -> Option<GpuVendor> {
+    #[cfg(target_os = "linux")]
+    {
+        let entries = std::fs::read_dir("/dev/dri").ok()?;
+        let mut render_nodes = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str
+                .strip_prefix("renderD")
+                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+            {
+                render_nodes.push(name_str.into_owned());
+            }
+        }
+
+        let mut vendors = Vec::new();
+        for node in &render_nodes {
+            let path = format!("/sys/class/drm/{node}/device/vendor");
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let hex = content.trim();
+                let hex = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X")).unwrap_or(hex);
+                if let Ok(vendor_id) = u32::from_str_radix(hex, 16) {
+                    vendors.push(vendor_id);
+                }
+            }
+        }
+
+        if vendors.contains(&0x10de) {
+            Some(GpuVendor::Nvidia)
+        } else if vendors.contains(&0x1002) && render_nodes.len() >= 2 {
+            Some(GpuVendor::Other)
+        } else if Path::new("/sys/module/nvidia").exists() && vendors.iter().any(|&v| v != 0x10de) {
+            Some(GpuVendor::Nvidia)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Применяет переменные PRIME offload для указанного производителя дискретного GPU.
+///
+/// # Safety
+/// Должно вызываться строго ДО старта сторонних потоков.
+unsafe fn apply_discrete_gpu(vendor: GpuVendor) {
+    // SAFETY: вызывается в самом начале процесса в GUI-потоке до старта сторонних потоков
+    unsafe {
+        match vendor {
+            GpuVendor::Nvidia => {
+                // Перенаправляем рендеринг на дискретный GPU NVIDIA (PRIME offload)
+                std::env::set_var("__NV_PRIME_RENDER_OFFLOAD", "1");
+                std::env::set_var("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
+                std::env::set_var("__VK_LAYER_NV_optimus", "NVIDIA_only");
+                // Wayland: Qt берёт контекст через EGL, а не GLX — вендор EGL тоже NVIDIA
+                for json in ["/usr/share/glvnd/egl_vendor.d/10_nvidia.json", "/etc/glvnd/egl_vendor.d/10_nvidia.json"] {
+                    if Path::new(json).exists() {
+                        std::env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", json);
+                        break;
+                    }
+                }
+                std::env::set_var("DRI_PRIME", "1");
+            }
+            GpuVendor::Other => {
+                // Для AMD и других дискретных видеокарт достаточно offload через Mesa
+                std::env::set_var("DRI_PRIME", "1");
+            }
+        }
+    }
+}
+
+/// Применяет предпочтение графического процессора через переменные окружения.
+///
+/// Должно вызываться строго ДО создания QApplication и графического контекста Qt (EGL/GLX/Vulkan),
+/// иначе загрузчики libglvnd / Mesa / драйвер NVIDIA зафиксируют устройство по умолчанию для процесса.
+fn apply_gpu_preference(settings: &SettingsStore) {
+    let pref = settings.get_str(SettingKey::GpuPreference);
+    match pref.as_str() {
+        "integrated" => {
+            // SAFETY: вызывается в самом начале процесса в GUI-потоке до старта сторонних потоков
+            unsafe {
+                // Принудительно отключаем PRIME offload и заставляем использовать интегрированную графику
+                std::env::remove_var("__NV_PRIME_RENDER_OFFLOAD");
+                std::env::remove_var("__GLX_VENDOR_LIBRARY_NAME");
+                std::env::remove_var("__VK_LAYER_NV_optimus");
+                std::env::remove_var("DRI_PRIME");
+                std::env::remove_var("__EGL_VENDOR_LIBRARY_FILENAMES");
+            }
+        }
+        "discrete" => {
+            // Если дискретной видеокарты нет или чтение sysfs не удалось — предупреждаем в лог
+            let Some(vendor) = discrete_gpu_vendor() else {
+                eprintln!("materialfy: gpu preference is 'discrete' but no dedicated GPU was detected");
+                return;
+            };
+            // SAFETY: вызывается в самом начале процесса в GUI-потоке до старта сторонних потоков
+            unsafe {
+                apply_discrete_gpu(vendor);
+            }
+        }
+        _ => {
+            // "auto" — как решит система: музыкальному плееру незачем будить дискретную видеокарту
+            // (батарея, вентиляторы); кто упирается в драйвер встроенной — выбирает «Дискретная» сам
+        }
+    }
+}
+
+/// Масштаб интерфейса из настроек: QT_SCALE_FACTOR читается QGuiApplication при создании, поэтому
+/// переменная выставляется до app_create. Смена настройки применяется после перезапуска приложения.
+fn apply_ui_scale(settings: &SettingsStore) {
+    if cfg!(target_os = "android") {
+        return;
+    }
+    const MARKER: &str = "MATERIALFY_UI_SCALE";
+    // Перезапуск из самого приложения (обновление, AppImage) наследует переменные прошлого процесса:
+    // в этом случае настройка важнее унаследованного значения, иначе новый масштаб не применится.
+    let relaunched = std::env::var_os(MARKER).is_some();
+    if !relaunched && std::env::var_os("QT_SCALE_FACTOR").is_some_and(|value| !value.is_empty()) {
+        return; // явное значение пользователя важнее настройки
+    }
+    let percent = settings.get_int(SettingKey::UiScale);
+    let factor = format!("{:.2}", percent as f64 / 100.0);
+    let percent = percent.to_string();
+    // Через Qt: на Windows он читает переменные из копии C-рантайма, std::env::set_var её не меняет
+    // (см. qml_cache). std::env нужен, чтобы значение унаследовал перезапущенный процесс.
+    ffi::set_qt_env(&qstr("QT_SCALE_FACTOR"), &qstr(&factor));
+    // SAFETY: вызывается до создания QApplication и сторонних потоков
+    unsafe {
+        std::env::set_var("QT_SCALE_FACTOR", &factor);
+        std::env::set_var(MARKER, &percent);
     }
 }
 
@@ -209,10 +359,16 @@ pub fn run(cli: Cli) -> i32 {
     setup_env(&cli);
     let qml_guard = crate::qml_cache::prepare(cli.screenshot.is_none());
     let config_dir = cli.config_dir.clone().or_else(|| cli.screenshot.as_ref().map(|_| make_temp_dir()));
+    let settings = SettingsStore::open(config_dir);
+    apply_gpu_preference(&settings);
+    apply_ui_scale(&settings);
 
     ffi::app_set_names(&qstr("Materialfy"), &qstr("materialfy"), &qstr("materialfy"));
     let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
     ffi::app_create(&args);
+    if ffi::is_android() {
+        prepare_android();
+    }
 
     let rt = match build_runtime() {
         Ok(rt) => rt,
@@ -222,8 +378,9 @@ pub fn run(cli: Cli) -> i32 {
         }
     };
 
-    // Плеер уже работает (возможно, спрятан в трей) — показываем его окно вместо второго экземпляра
-    if cli.main_mode() && !cli.new_instance && rt.block_on(mf_platform::single_instance::raise_running_instance()) {
+    // Плеер уже работает (возможно, спрятан в трей или ещё запускается) — показываем его окно вместо второго
+    // экземпляра. --new-instance — для разработки и снимков
+    if cli.main_mode() && !cli.new_instance && !rt.block_on(mf_platform::single_instance::become_primary()) {
         return 0;
     }
     if let Some(guard) = qml_guard {
@@ -243,7 +400,7 @@ pub fn run(cli: Cli) -> i32 {
     load_fonts();
     init_tracing();
 
-    let settings = SettingsStore::open(config_dir);
+    mf_i18n::set_phone(cli.mobile);
     // UI language before any service or QML produces text (default: the OS UI language — Russian or English)
     crate::bridges::translations::apply_language(crate::bridges::translations::effective_language(&settings));
     let options = ServicesOptions {
@@ -293,17 +450,37 @@ fn run_engine(cli: &Cli, rt: &tokio::runtime::Runtime, services: &Services) -> i
     ffi::engine_set_context_bool(e.as_mut(), &qstr("materialfyDebugWheel"), cli.debug_wheel);
     ffi::engine_set_context_bool(e.as_mut(), &qstr("materialfyDebugFps"), cli.debug_fps);
     // Значок в трее: не для снимков и не для галереи
-    ffi::engine_set_context_bool(e.as_mut(), &qstr("materialfyTray"), cli.screenshot.is_none() && !cli.gallery);
+    ffi::engine_set_context_bool(
+        e.as_mut(),
+        &qstr("materialfyTray"),
+        cli.screenshot.is_none() && !cli.gallery && !cli.mobile,
+    );
+    // Раскладка телефона: нижняя навигация, плеер-шторка, крупные цели касания (Theme.mobile)
+    ffi::engine_set_context_bool(e.as_mut(), &qstr("materialfyMobile"), cli.mobile);
 
     let entry = match &cli.qml {
         Some(file) => absolute(file),
-        None => qml_dir().join(if cli.gallery { "gallery/Gallery.qml" } else { "Main.qml" }),
+        None => qml_dir().join(if cli.gallery {
+            "gallery/Gallery.qml"
+        } else if cli.mobile {
+            "MobileMain.qml"
+        } else {
+            "Main.qml"
+        }),
     };
     e.as_mut().set_initial_properties(&initial_properties(cli));
     e.as_mut().load(&QUrl::from_local_file(&qpath(&entry)));
 
     let root = ffi::engine_root_object(&e);
     if root.is_null() {
+        let msg = format!("QQmlApplicationEngine failed to load root component from {}\n", entry.display());
+        let path = mf_platform::dirs::app_data_dir().join("crash.log");
+        let _ = std::fs::create_dir_all(mf_platform::dirs::app_data_dir());
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write as _;
+            let _ = f.write_all(msg.as_bytes());
+        }
+        eprintln!("{msg}");
         return 1;
     }
     if !cli.offline {
@@ -320,8 +497,13 @@ fn run_engine(cli: &Cli, rt: &tokio::runtime::Runtime, services: &Services) -> i
     }
     // SAFETY: root — живое окно движка, GUI-поток
     unsafe { ffi::watch_software_rendering(root) };
-    if cli.screenshot.is_none() {
+    if cli.screenshot.is_none() && !ffi::is_android() {
         crate::winframe::install(root);
+        // SAFETY: root — живое окно движка, GUI-поток
+        unsafe { ffi::install_memory_trim(root) };
+    }
+    if cli.screenshot.is_none() && ffi::is_android() {
+        // Android: в фоне — мусор JS, кэши и свободная куча системе (без снятия сцены, см. install_memory_trim)
         // SAFETY: root — живое окно движка, GUI-поток
         unsafe { ffi::install_memory_trim(root) };
     }
@@ -339,6 +521,40 @@ fn run_engine(cli: &Cli, rt: &tokio::runtime::Runtime, services: &Services) -> i
     let code = ffi::app_exec();
     drop(engine);
     code
+}
+
+/// Android, сразу после QApplication: QML и ассеты из APK — в каталог приложения (std::fs и движок QML читают
+/// обычные файлы), JNI-контекст для cpal (AAudio), браузер для входа — через Intent.
+fn prepare_android() {
+    let qml = ffi::android_prepare_assets(&qstr(env!("CARGO_PKG_VERSION"))).to_string();
+    if qml.is_empty() {
+        eprintln!("materialfy: could not extract the QML bundle from the APK");
+    } else {
+        // SAFETY: до запуска рантайма tokio и до первого qml_dir(); других потоков Rust, читающих окружение, нет
+        unsafe { std::env::set_var("MATERIALFY_QML_DIR", &qml) };
+    }
+    // на других ОС функции есть (C++ собирается везде), но не нужны
+    #[cfg(not(target_os = "android"))]
+    let _ = (ffi::android_java_vm, ffi::android_context, ffi::android_install_apk);
+    #[cfg(target_os = "android")]
+    {
+        let (vm, context) = (ffi::android_java_vm(), ffi::android_context());
+        if vm != 0 && context != 0 {
+            // SAFETY: JavaVM* процесса и глобальная ссылка на Context живут до конца процесса
+            unsafe { ndk_context::initialize_android_context(vm as *mut _, context as *mut _) };
+        }
+    }
+    sf_services::set_browser_opener(|url| {
+        ffi::open_url_external(&qstr(url));
+        Ok(())
+    });
+    sf_services::update::install::set_apk_installer(|file| {
+        match ffi::android_install_apk(&qpath(file)).to_string().as_str() {
+            "" => Ok(()),
+            "permission" => Err(mf_i18n::t("Allow Materialfy to install apps in the settings that opened, then press Install again")),
+            other => Err(other.to_owned()),
+        }
+    });
 }
 
 fn find_qml_dir() -> PathBuf {

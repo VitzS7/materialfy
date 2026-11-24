@@ -89,7 +89,17 @@ Item {
                 if (Player.isEpisode)
                     Player.seekRelative(-10000)
                 else
-                    Player.shuffle = !Player.shuffle
+                    Player.cycleShuffle()
+            }
+            // Smart Shuffle — искра вместо кончика стрелки, как у Spotify (подложка цвета кнопки прячет кончик)
+            Rectangle {
+                visible: !Player.isEpisode && Player.smartShuffle
+                width: parent.iconSize * 0.6; height: width; radius: width / 2
+                color: parent.containerColor
+                anchors.centerIn: parent
+                anchors.horizontalCenterOffset: parent.iconSize * 0.42
+                anchors.verticalCenterOffset: -parent.iconSize * 0.42
+                Icon { anchors.centerIn: parent; name: "auto_awesome"; size: parent.width * 0.85; fill: 1; color: parent.parent.iconColor }
             }
         } }
         IconButton { icon: "skip_previous"; iconColor: Theme.fgSurface; enabled: Player.hasTrack; onClicked: Player.previous() }
@@ -100,16 +110,10 @@ Item {
                 anchors.fill: parent
                 size: 52
                 playing: Player.playing
+                loading: Player.buffering
                 spin: Player.isLocal === true      // пульт не перерисовывает окно каждый кадр
                 enabled: Player.hasTrack
                 onClicked: Player.togglePlay()
-            }
-            LoadingIndicator {
-                anchors.centerIn: parent
-                size: 60
-                color: Theme.primary
-                visible: Player.buffering
-                opacity: 0.5
             }
         }
         IconButton { icon: "skip_next"; iconColor: Theme.fgSurface; enabled: Player.hasTrack; onClicked: Player.next() }
@@ -210,15 +214,28 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
+                        // Исполнители — по ссылке на каждого (карточка по наведению). Выпуск, ошибка, пустой
+                        // плеер и тесная пилюля с чужим устройством остаются одной подписью
+                        readonly property bool artistLinks: Player.errorText === "" && Player.hasTrack
+                                                            && Player.isEpisode !== true
+                                                            && !(remoteLabel.shown && !root.roomForMenu)
+                        ArtistLinks {
+                            Layout.fillWidth: true
+                            visible: parent.artistLinks
+                            // карточки по наведению тут нет: клик по имени сразу открывает исполнителя
+                            preview: false
+                            refs: Player.track ? (Player.track.artistRefs ?? []) : []
+                            text: Player.artist
+                            type: "bodySmall"
+                            color: Theme.fgSurfaceVariant
+                        }
                         LinkLabel {
                             Layout.fillWidth: true
-                            // в тесной пилюле при игре на другом устройстве вместо исполнителя — «Играет на …»
-                            visible: !(remoteLabel.shown && !root.roomForMenu && Player.errorText === "")
+                            visible: !parent.artistLinks && !(remoteLabel.shown && !root.roomForMenu && Player.errorText === "")
                             // у выпуска подкаста — ссылка на подкаст
-                            linkEnabled: Player.errorText === "" && Player.hasTrack
-                                         && (Player.isEpisode ? (Player.track.showId ?? "") !== "" : (Player.track.artistRefs ?? []).length > 0)
-                            previewArtistId: !Player.isEpisode && (Player.track.artistRefs ?? []).length === 1 ? Player.track.artistRefs[0].id : ""
-                            onClicked: Player.isEpisode ? Catalog.openShow(Player.track.showId ?? "") : Catalog.openArtists(Player.track.artistRefs ?? [])
+                            linkEnabled: Player.errorText === "" && Player.hasTrack && Player.isEpisode === true
+                                         && (Player.track.showId ?? "") !== ""
+                            onClicked: Catalog.openShow(Player.track.showId ?? "")
                             text: Player.errorText !== "" ? Player.errorText
                                 : Player.hasTrack ? Player.artist : I18n.t("Play a track, album or playlist")
                             type: "bodySmall"
@@ -266,6 +283,7 @@ Item {
                 id: trackMenuTap
                 enabled: Player.hasTrack
                 acceptedButtons: Qt.RightButton
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad   // касание — не правый клик: у него нет кнопок, TapHandler принял бы любой тап
                 onTapped: (point) => {
                     const p = trackMenuTap.parent.mapToItem(null, point.position.x, point.position.y)
                     Catalog.requestTrackMenu(Player.track, p.x, p.y)

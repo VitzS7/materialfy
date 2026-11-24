@@ -1,6 +1,7 @@
 //! Синхронные тексты — порт lyrics_sources.py из yamusic-md3 (+ кэш из lyrics.py).
 //!
-//! Цепочка источников (fetch): Spotify LRC (внешний источник ExtraLrc — первым, как в spotifast) → NetEase YRC
+//! Цепочка источников (fetch): Spotify (внешний источник ExtraLrc — первым, как в spotifast; SYLLABLE_SYNCED —
+//! по словам из слогов ответа, LINE_SYNCED — построчно) → NetEase YRC
 //! (по словам) → Musixmatch richsync (по словам) → LRCLIB (строки) → Musixmatch subtitles → NetEase LRC.
 //! У построчных текстов время слов интерполируется. Формат результата и кэша (JSON) — по ключам как в Python.
 pub mod lrc;
@@ -17,13 +18,15 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use sha1::{Digest, Sha1};
 
-use crate::lrc::{add_gaps, build_from_timed_lines, lines_from_lrc, parse_yrc};
-use crate::text::is_placeholder;
+use crate::lrc::{add_gaps, build_from_timed_lines, group_syllables, lines_from_lrc, parse_yrc, round3};
+use crate::text::{is_meta_line, is_placeholder};
 
 /// 4 — внешний LRC в конце цепочки; 5 — заглушки NetEase «текста нет» пропускаются;
 /// 6 — LRCLIB: нечёткое название и разметка, с которой согласно большинство записей;
-/// 7 — Spotify первым, id трека — base62 Spotify
-pub const CACHE_VERSION: u32 = 7;
+/// 7 — Spotify первым, id трека — base62 Spotify;
+/// 8 — Spotify SYLLABLE_SYNCED: время слов из слогов ответа вместо интерполяции
+/// 10 — слова NetEase/Musixmatch поверх строк Spotify сдвинуты к времени этих строк
+pub const CACHE_VERSION: u32 = 10;
 /// «Не найдено» перепроверяется через 6 часов
 pub const NOT_FOUND_TTL_SECS: u64 = 6 * 3600;
 /// Таймаут HTTP источников, с (2 повтора на 5xx/сеть с паузой 0,7·(n+1) с)
@@ -63,6 +66,10 @@ pub enum Line {
 }
 
 impl Line {
+    pub fn words(t: f64, e: f64, w: Vec<Word>, i: bool) -> Self {
+        Self::Words { t, e, w, i }
+    }
+
     /// "t" — начало
     pub fn start(&self) -> f64 {
         match self {
@@ -153,12 +160,58 @@ impl serde_json::ser::Formatter for PyFormatter {
     }
 }
 
-/// Внешний LRC-источник — тексты Spotify (замыкание из sf-services поверх PlayerHandle::lyrics_json
-/// и lrc_from_spotify). Ok(None) — текста нет; Err — источник не ответил (такое «не найдено» не кэшируется).
-pub type ExtraLrc = Arc<dyn Fn() -> BoxFuture<'static, Result<Option<String>, String>> + Send + Sync>;
+/// Внешний источник — JSON ответа Spotify `color-lyrics` (замыкание из sf-services поверх
+/// PlayerHandle::lyrics_json). Ok(None) — текста нет; Err — источник не ответил (такое «не найдено» не кэшируется).
+pub type ExtraLrc = Arc<dyn Fn() -> BoxFuture<'static, Result<Option<serde_json::Value>, String>> + Send + Sync>;
 
 /// Подпись источника ExtraLrc в результате (`source`).
 pub const EXTRA_SOURCE: &str = "Spotify";
+
+/// Миллисекунды Spotify: строка или число
+fn ms(value: &serde_json::Value) -> Option<u64> {
+    value.as_str().and_then(|s| s.trim().parse().ok()).or_else(|| value.as_u64())
+}
+
+/// Слог Spotify {"startTimeMs", "endTimeMs", "words"} → (текст, начало, конец) в секундах
+fn syllable(value: &serde_json::Value) -> Option<(String, f64, f64)> {
+    let start = value.get("startTimeMs").and_then(ms)?;
+    let end = value.get("endTimeMs").and_then(ms).unwrap_or(start);
+    let words = value.get("words")?.as_str()?;
+    Some((words.to_owned(), round3(start as f64 / 1000.0), round3(end as f64 / 1000.0)))
+}
+
+/// Ответ Spotify `color-lyrics` с SYLLABLE_SYNCED → строки с настоящим временем слов из `syllables` (i = false).
+/// None — syncType другой или разметки слогов нет хотя бы у одной поющейся строки: тогда работает построчный
+/// `lrc_from_spotify` с интерполяцией, как раньше. Строки «♪» и пустые метки пропускаются.
+pub fn lines_from_spotify(json: &serde_json::Value) -> Option<Vec<Line>> {
+    let lyrics = json.get("lyrics")?;
+    if lyrics.get("syncType").and_then(|v| v.as_str()) != Some("SYLLABLE_SYNCED") {
+        return None;
+    }
+    let mut out = Vec::new();
+    for line in lyrics.get("lines")?.as_array()? {
+        let Some(at_ms) = line.get("startTimeMs").and_then(ms) else { continue };
+        let words = line.get("words").and_then(|v| v.as_str()).unwrap_or("");
+        let text = words.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() || text == "\u{266a}" || is_meta_line(&text) {
+            continue;
+        }
+        let syllables: Vec<(String, f64, f64)> = line
+            .get("syllables")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(syllable).collect())
+            .unwrap_or_default();
+        // неполная разметка — построчный текст лучше, чем потерянная строка
+        if syllables.is_empty() {
+            return None;
+        }
+        let words = group_syllables(&syllables);
+        let Some(last) = words.last() else { continue };
+        let t = round3(at_ms as f64 / 1000.0);
+        out.push(Line::words(t, round3(t.max(last.e)), words, false));
+    }
+    (!out.is_empty()).then_some(out)
+}
 
 /// Ответ Spotify `color-lyrics` (JSON {"lyrics": {"syncType", "lines": [{"startTimeMs", "words"}]}}) → LRC
 /// построчно, `[mm:ss.mmm]текст`. Перенос lyrics::from_spotify из spotifast. Строки «♪» и пустые остаются
@@ -172,9 +225,7 @@ pub fn lrc_from_spotify(json: &serde_json::Value) -> Option<String> {
     }
     let mut timed: Vec<(u64, String)> = Vec::new();
     for line in lyrics.get("lines")?.as_array()? {
-        let Some(at_ms) = line.get("startTimeMs").and_then(|v| {
-            v.as_str().and_then(|s| s.trim().parse().ok()).or_else(|| v.as_u64())
-        }) else {
+        let Some(at_ms) = line.get("startTimeMs").and_then(ms) else {
             continue;
         };
         let words = line.get("words").and_then(|v| v.as_str()).unwrap_or("");
@@ -226,6 +277,8 @@ type ClientSource = std::sync::Arc<dyn Fn() -> Result<reqwest::Client, String> +
 pub struct LyricsFetcher {
     cache_dir: PathBuf,
     http: ClientSource,
+    /// Свой токен Musixmatch из настроек; пусто — анонимный (его Musixmatch сейчас блокирует).
+    mxm_user_token: std::sync::Arc<dyn Fn() -> String + Send + Sync>,
 }
 
 impl LyricsFetcher {
@@ -252,7 +305,13 @@ impl LyricsFetcher {
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
             tracing::warn!("lyrics: cache directory {} not created: {e}", cache_dir.display());
         }
-        Self { cache_dir, http: std::sync::Arc::new(source) }
+        Self { cache_dir, http: std::sync::Arc::new(source), mxm_user_token: std::sync::Arc::new(String::new) }
+    }
+
+    /// Токен Musixmatch читается на каждый поиск: новый из настроек применяется сразу.
+    pub fn with_mxm_user_token(mut self, token: impl Fn() -> String + Send + Sync + 'static) -> Self {
+        self.mxm_user_token = std::sync::Arc::new(token);
+        self
     }
 
     pub fn cache_dir(&self) -> &Path {
@@ -287,6 +346,33 @@ impl LyricsFetcher {
         tokio::fs::rename(&tmp, &path).await
     }
 
+    /// Word-level result from the sources that have it, without lines-only fallbacks.
+    /// Called after Spotify returned line lyrics: the caller waits a little and, if this is
+    /// slow, keeps the line result and lets a background task fill the cache.
+    async fn word_result(&self, query: &LyricsQuery) -> Option<LyricsResult> {
+        let http = (self.http)().ok()?;
+        if let Ok(Some(song)) = sources::ne_search(&http, query).await {
+            if let Some(id) = song.get("id") {
+                if let Ok(data) = sources::ne_lyric_by_id(&http, &py_id(id)).await {
+                    // нет YRC — не выход из функции: дальше пробуем Musixmatch
+                    let yrc = data.get("yrc").and_then(|y| y.get("lyric")).and_then(|v| v.as_str()).unwrap_or("");
+                    if !yrc.is_empty() {
+                        let lines = parse_yrc(yrc);
+                        let texts: Vec<String> = lines.iter().map(Line::text).collect();
+                        if !lines.is_empty() && !is_placeholder(texts.iter().map(String::as_str)) {
+                            return Some(LyricsResult::found("NetEase", "word", lines));
+                        }
+                    }
+                }
+            }
+        }
+        let token = sources::mxm_token(&http, &self.cache_dir, (self.mxm_user_token)().trim()).await.ok().flatten().filter(|t| !t.is_empty())?;
+        match sources::mxm_fetch(&http, query, &token).await {
+            Ok(Some(("word", lines))) => Some(LyricsResult::found("Musixmatch", "word", lines)),
+            _ => None,
+        }
+    }
+
     /// Как _fetch_cached в lyrics.py: файл <cache_dir>/<sha1(f"{CACHE_VERSION}|{track_id}")>.json;
     /// ok — навсегда, not found — NOT_FOUND_TTL_SECS по mtime. Найденное проходит add_gaps(lines, duration).
     /// Результат с непустым details (источник ответил ошибкой) не кэшируется. Запись — через .part + rename.
@@ -294,7 +380,32 @@ impl LyricsFetcher {
         if let Some(cached) = self.read_cache(&query.track_id).await {
             return cached;
         }
-        let mut result = self.fetch(query, "", extra).await;
+        let mut result = self.fetch(query, (self.mxm_user_token)().trim(), extra).await;
+        if result.ok && result.source == EXTRA_SOURCE && result.kind == "line" {
+            // Spotify knew the lines immediately; a word-level source makes the fill non-linear.
+            // Wait a little, then keep the line and finish the upgrade in the background.
+            // один запрос: по таймауту он не перезапускается, а дорабатывает в фоне
+            let me = self.clone();
+            let q = query.clone();
+            let reference = result.lines.clone();
+            let mut task =
+                tokio::spawn(async move { me.word_result(&q).await.and_then(|word| align_to(word, &reference)) });
+            match tokio::time::timeout(Duration::from_millis(1500), &mut task).await {
+                Ok(Ok(Some(word))) => result = word,
+                Ok(_) => {}
+                Err(_) => {
+                    let me = self.clone();
+                    let query = query.clone();
+                    tokio::spawn(async move {
+                        let Ok(Some(mut word)) = task.await else { return };
+                        word.lines = add_gaps(std::mem::take(&mut word.lines), query.duration);
+                        if let Err(e) = me.write_cache(&query.track_id, &word).await {
+                            tracing::warn!("lyrics: word upgrade {} not cached: {e}", query.track_id);
+                        }
+                    });
+                }
+            }
+        }
         if result.ok {
             result.lines = add_gaps(std::mem::take(&mut result.lines), query.duration);
         }
@@ -312,13 +423,21 @@ impl LyricsFetcher {
         let duration = query.duration;
         let mut errors = Vec::new();
 
-        // 0. Spotify — первым: это текст именно этой записи
+        // 0. Spotify — первым: это текст именно этой записи. SYLLABLE_SYNCED даёт время слов;
+        // LINE_SYNCED отдаётся сразу, чтобы текст не ждал медленных источников. Если рядом есть
+        // время слов (NetEase/Musixmatch), fetch_cached подтянет его за 1.5 с и закэширует;
+        // медленный источник догружается в фоне.
         if let Some(extra) = extra {
-            let lrc = attempt(&mut errors, "spotify", extra().await).flatten();
-            if let Some(lrc) = lrc.filter(|l| !l.is_empty()) {
-                let lines = build_from_timed_lines(&lines_from_lrc(&lrc), duration);
-                if !lines.is_empty() {
-                    return LyricsResult::found(EXTRA_SOURCE, "line", lines);
+            let json = attempt(&mut errors, "spotify", extra().await).flatten();
+            if let Some(json) = json {
+                if let Some(lines) = lines_from_spotify(&json) {
+                    return LyricsResult::found(EXTRA_SOURCE, "word", lines);
+                }
+                if let Some(lrc) = lrc_from_spotify(&json).filter(|l| !l.is_empty()) {
+                    let lines = build_from_timed_lines(&lines_from_lrc(&lrc), duration);
+                    if !lines.is_empty() {
+                        return LyricsResult::found(EXTRA_SOURCE, "line", lines);
+                    }
                 }
             }
         }
@@ -395,6 +514,69 @@ impl LyricsFetcher {
     }
 }
 
+/// Слова NetEase/Musixmatch, сдвинутые к строкам Spotify. Сторонний источник нередко размечал
+/// другую версию записи (другое вступление, ремастер), и весь текст едет на постоянную величину:
+/// у «Lose Yourself» YRC идёт на 1,2 с раньше. Сдвиг — медиана расхождения одинаковых строк.
+/// None — расхождение по песне гуляет больше секунды, это другая версия, остаются строки Spotify.
+fn align_to(mut word: LyricsResult, reference: &[Line]) -> Option<LyricsResult> {
+    let mut deltas = matched_deltas(&word.lines, reference);
+    if deltas.len() < 3 {
+        // текст не сопоставить (другая запись слов) — сверить нечем, как раньше
+        return Some(word);
+    }
+    deltas.sort_by(f64::total_cmp);
+    let at = |q: f64| deltas[((deltas.len() - 1) as f64 * q).round() as usize];
+    if at(0.9) - at(0.1) > 1.0 {
+        tracing::debug!("lyrics: {} words fit another cut, keeping the Spotify lines", word.source);
+        return None;
+    }
+    let shift = at(0.5);
+    tracing::debug!("lyrics: {} words shifted {shift:+.3}s onto {} Spotify lines", word.source, deltas.len());
+    let moved = |t: f64| round3((t + shift).max(0.0));
+    for line in &mut word.lines {
+        match line {
+            Line::Gap { t, e, .. } => (*t, *e) = (moved(*t), moved(*e)),
+            Line::Words { t, e, w, .. } => {
+                (*t, *e) = (moved(*t), moved(*e));
+                for word in w {
+                    (word.s, word.e) = (moved(word.s), moved(word.e));
+                    for part in word.p.iter_mut().flatten() {
+                        (part.1, part.2) = (moved(part.1), moved(part.2));
+                    }
+                }
+            }
+        }
+    }
+    Some(word)
+}
+
+/// Насколько строка Spotify позже такой же строки источника, по каждой паре. Повторы (припев)
+/// сопоставляются с ближайшей по времени ещё не занятой строкой.
+fn matched_deltas(lines: &[Line], reference: &[Line]) -> Vec<f64> {
+    let texts = |lines: &[Line]| -> Vec<(f64, String)> {
+        lines.iter().filter(|l| matches!(l, Line::Words { .. })).map(|l| (l.start(), text::norm(&l.text()))).collect()
+    };
+    let reference = texts(reference);
+    let mut used = vec![false; reference.len()];
+    let mut deltas = Vec::new();
+    for (t, x) in texts(lines) {
+        // короткие «oh», «yeah» повторяются по всей песне
+        if x.chars().count() < 4 {
+            continue;
+        }
+        let nearest = reference
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, y))| !used[*i] && *y == x)
+            .min_by(|a, b| (a.1.0 - t).abs().total_cmp(&(b.1.0 - t).abs()));
+        if let Some((i, (u, _))) = nearest {
+            used[i] = true;
+            deltas.push(u - t);
+        }
+    }
+    deltas
+}
+
 /// str(song["id"]) Python
 fn py_id(id: &serde_json::Value) -> String {
     match id {
@@ -413,12 +595,12 @@ mod tests {
             "line",
             vec![
                 Line::Gap { gap: true, t: 0.0, e: 4.85 },
-                Line::Words {
-                    t: 5.0,
-                    e: 6.5,
-                    w: vec![Word { x: "раз ".into(), s: 5.0, e: 5.5, p: Some(vec![(1, 5.0, 5.25), (2, 5.25, 5.5)]) }],
-                    i: true,
-                },
+                Line::words(
+                    5.0,
+                    6.5,
+                    vec![Word { x: "раз ".into(), s: 5.0, e: 5.5, p: Some(vec![(1, 5.0, 5.25), (2, 5.25, 5.5)]) }],
+                    true,
+                ),
             ],
         )
     }
@@ -441,6 +623,38 @@ mod tests {
         assert_eq!(serde_json::from_str::<LyricsResult>(&r.to_python_json()).unwrap(), r);
         let nf = LyricsResult::not_found(vec!["lrclib: HTTP Error 503: Service Unavailable".into()]);
         assert_eq!(serde_json::from_str::<LyricsResult>(&serde_json::to_string(&nf).unwrap()).unwrap(), nf);
+    }
+
+    fn line_at(t: f64, text: &str) -> Line {
+        let w = text.split(' ').enumerate().map(|(i, x)| Word { x: format!("{x} "), s: t + i as f64 * 0.5, e: t + i as f64 * 0.5 + 0.4, p: None });
+        Line::words(t, t + 2.0, w.collect(), false)
+    }
+
+    fn song(starts: &[f64]) -> Vec<Line> {
+        let texts = ["first line here", "second line here", "third line here", "fourth line here"];
+        starts.iter().zip(texts).map(|(t, x)| line_at(*t, x)).collect()
+    }
+
+    #[test]
+    fn word_timings_move_onto_the_spotify_lines() {
+        let word = LyricsResult::found("NetEase", "word", song(&[8.8, 18.8, 28.8, 38.8]));
+        let aligned = align_to(word, &song(&[10.0, 20.0, 30.0, 40.0])).unwrap();
+        assert_eq!(aligned.lines.iter().map(Line::start).collect::<Vec<_>>(), [10.0, 20.0, 30.0, 40.0]);
+        let Line::Words { w, .. } = &aligned.lines[0] else { panic!() };
+        assert_eq!((w[1].s, w[1].e), (10.5, 10.9));
+    }
+
+    #[test]
+    fn another_cut_of_the_song_keeps_the_spotify_lines() {
+        let word = LyricsResult::found("NetEase", "word", song(&[10.0, 20.0, 30.0, 40.0]));
+        assert!(align_to(word, &song(&[10.0, 20.0, 33.0, 43.0])).is_none());
+    }
+
+    #[test]
+    fn lines_that_cannot_be_matched_stay_as_they_are() {
+        let word = LyricsResult::found("NetEase", "word", song(&[8.8, 18.8]));
+        let aligned = align_to(word.clone(), &song(&[10.0, 20.0])).unwrap();
+        assert_eq!(aligned, word);
     }
 
     #[test]
@@ -531,10 +745,10 @@ mod tests {
     async fn spotify_comes_first() {
         let dir = std::env::temp_dir().join(format!("mf-lyrics-test-spotify-{}", std::process::id()));
         let fetcher = LyricsFetcher::new(dir.clone());
-        let lrc = lrc_from_spotify(&color_lyrics("LINE_SYNCED")).unwrap();
+        let json = color_lyrics("LINE_SYNCED");
         let extra: ExtraLrc = Arc::new(move || {
-            let lrc = lrc.clone();
-            Box::pin(async move { Ok(Some(lrc)) })
+            let json = json.clone();
+            Box::pin(async move { Ok(Some(json)) })
         });
         let query = LyricsQuery { track_id: "4uLU6hMCjMI75M1A2tKUQC".into(), title: "x".into(), duration: 300.0, ..Default::default() };
         let result = fetcher.fetch_cached(&query, Some(extra)).await;
@@ -544,6 +758,79 @@ mod tests {
         assert_eq!(result.lines.iter().filter(|l| !l.text().is_empty()).count(), 3);
         // найденное записано в кэш текущей версии
         assert_eq!(fetcher.read_cache(&query.track_id).await, Some(result));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// SYLLABLE_SYNCED: у каждой поющейся строки есть слоги со своим временем.
+    fn color_lyrics_syllables() -> serde_json::Value {
+        serde_json::json!({"lyrics": {"syncType": "SYLLABLE_SYNCED", "lines": [
+            {"startTimeMs": "0", "words": "♪", "syllables": []},
+            {"startTimeMs": "17120", "words": "Hello darkness", "syllables": [
+                {"startTimeMs": "17120", "endTimeMs": "17620", "words": "Hel"},
+                {"startTimeMs": "17620", "endTimeMs": "18140", "words": "lo "},
+                {"startTimeMs": "18140", "endTimeMs": "19100", "words": "dark"},
+                {"startTimeMs": "19100", "endTimeMs": "19700", "words": "ness"}]},
+            {"startTimeMs": "21860", "words": "my old friend", "syllables": [
+                {"startTimeMs": "21860", "endTimeMs": "22100", "words": "my "},
+                {"startTimeMs": "22100", "endTimeMs": "22600", "words": "old "},
+                {"startTimeMs": "22600", "endTimeMs": "23260", "words": "friend"}]},
+            {"startTimeMs": "27010", "words": "", "syllables": []}
+        ]}})
+    }
+
+    #[test]
+    fn syllable_synced_lines_keep_word_timing() {
+        let lines = lines_from_spotify(&color_lyrics_syllables()).unwrap();
+        assert_eq!(lines.len(), 2, "«♪» и пустая метка — не строки");
+        let Line::Words { t, e, w, i, .. } = &lines[0] else { panic!("ожидалась строка со словами") };
+        assert!(!i, "время слов настоящее, а не интерполированное");
+        assert_eq!((*t, *e), (17.12, 19.7));
+        assert_eq!(w.iter().map(|w| w.x.as_str()).collect::<Vec<_>>(), vec!["Hello ", "darkness"]);
+        // слоги одного слова остаются внутри него: "Hel"+"lo " и "dark"+"ness"
+        assert_eq!(w[0], Word { x: "Hello ".into(), s: 17.12, e: 18.14, p: Some(vec![(3, 17.12, 17.62), (2, 17.62, 18.14)]) });
+        assert_eq!(w[1], Word { x: "darkness".into(), s: 18.14, e: 19.7, p: Some(vec![(4, 18.14, 19.1), (4, 19.1, 19.7)]) });
+        assert_eq!(lines[1].end(), 23.26);
+        assert_eq!(lines[1].text(), "my old friend");
+    }
+
+    #[tokio::test]
+    async fn synthetic_spotify_lines_win_over_interpolation() {
+        let dir = std::env::temp_dir().join(format!("mf-lyrics-test-syllables-{}", std::process::id()));
+        let fetcher = LyricsFetcher::new(dir.clone());
+        let json = color_lyrics_syllables();
+        let extra: ExtraLrc = Arc::new(move || {
+            let json = json.clone();
+            Box::pin(async move { Ok(Some(json)) })
+        });
+        let query = LyricsQuery { track_id: "syllables".into(), title: "x".into(), duration: 300.0, ..Default::default() };
+        let result = fetcher.fetch_cached(&query, Some(extra)).await;
+        assert!(result.ok);
+        assert_eq!((result.source.as_str(), result.kind.as_str()), (EXTRA_SOURCE, "word"));
+        assert_eq!(result.lines.iter().filter(|l| !l.text().is_empty()).count(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn incomplete_syllables_fall_back_to_the_line_lrc() {
+        let dir = std::env::temp_dir().join(format!("mf-lyrics-test-half-syllables-{}", std::process::id()));
+        // Сеть выключена: проверяем, что построчный Spotify не теряется, когда другие
+        // источники недоступны (он теперь запасной, а не первый).
+        let fetcher = LyricsFetcher::with_source(dir.clone(), || Err("offline".into()));
+        // SYLLABLE_SYNCED, но слогов у поющейся строки нет — построчный путь и интерполяция
+        let json = serde_json::json!({"lyrics": {"syncType": "SYLLABLE_SYNCED", "lines": [
+            {"startTimeMs": "1000", "words": "раз два", "syllables": []},
+            {"startTimeMs": "3000", "words": "три", "syllables": [
+                {"startTimeMs": "3000", "endTimeMs": "3500", "words": "три"}]}
+        ]}});
+        assert_eq!(lines_from_spotify(&json), None);
+        let extra: ExtraLrc = Arc::new(move || {
+            let json = json.clone();
+            Box::pin(async move { Ok(Some(json)) })
+        });
+        let query = LyricsQuery { track_id: "half".into(), title: "x".into(), duration: 60.0, ..Default::default() };
+        let result = fetcher.fetch_cached(&query, Some(extra)).await;
+        assert!(result.ok);
+        assert_eq!((result.source.as_str(), result.kind.as_str()), (EXTRA_SOURCE, "line"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
