@@ -282,6 +282,20 @@ MobileShell::backgroundIssues() const
 #endif
 }
 
+QString
+MobileShell::lastExit() const
+{
+#if defined(Q_OS_ANDROID)
+  const QJniObject result = QJniObject::callStaticObjectMethod(
+    BRIDGE, "lastExit", "(Landroid/content/Context;)Ljava/lang/String;", context_object().object());
+  QJniEnvironment env;
+  env.checkAndClearExceptions();
+  return result.isValid() ? result.toString() : QString();
+#else
+  return {};
+#endif
+}
+
 void
 MobileShell::openBackgroundSetting(const QString& what)
 {

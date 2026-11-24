@@ -1647,7 +1647,11 @@ Page {
         SettingRow {
             visible: MobileShell.android
             title: I18n.t("Keep the music playing")
-            description: I18n.t("Battery optimization, notifications and autostart, so Android does not close Materialfy in the background")
+            description: {
+                const base = I18n.t("Battery optimization, notifications and autostart, so Android does not close Materialfy in the background")
+                const exit = MobileShell.android ? MobileShell.lastExit() : ""
+                return exit === "" ? base : base + "\n" + I18n.t("Last time it was closed: {0}", exit)
+            }
             Button {
                 text: I18n.t("Check")
                 style: "tonal"

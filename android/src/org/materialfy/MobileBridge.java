@@ -178,6 +178,37 @@ public final class MobileBridge
         return String.join(",", issues);
     }
 
+    // Почему закрылся прошлый процесс: «причина (описание оболочки), N мин назад»; пусто, если не известно.
+    // Музыка «пропадала сама» с погашенным экраном — отсюда видно, убила ли её система (FREEZER, LOW_MEMORY, оболочка)
+    public static String lastExit(Context context)
+    {
+        if (Build.VERSION.SDK_INT < 30)
+            return "";
+        android.app.ActivityManager am = (android.app.ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+        if (am == null)
+            return "";
+        java.util.List<android.app.ApplicationExitInfo> exits = am.getHistoricalProcessExitReasons(null, 0, 1);
+        if (exits.isEmpty())
+            return "";
+        android.app.ApplicationExitInfo info = exits.get(0);
+        String reason;
+        switch (info.getReason()) {
+        case android.app.ApplicationExitInfo.REASON_EXIT_SELF: reason = "closed itself"; break;
+        case android.app.ApplicationExitInfo.REASON_SIGNALED: reason = "killed (signal)"; break;
+        case android.app.ApplicationExitInfo.REASON_LOW_MEMORY: reason = "low memory"; break;
+        case android.app.ApplicationExitInfo.REASON_CRASH: reason = "crash"; break;
+        case android.app.ApplicationExitInfo.REASON_CRASH_NATIVE: reason = "native crash"; break;
+        case android.app.ApplicationExitInfo.REASON_ANR: reason = "not responding"; break;
+        case android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE: reason = "too much battery or CPU"; break;
+        case android.app.ApplicationExitInfo.REASON_USER_REQUESTED: reason = "closed by the user or the phone's cleaner"; break;
+        case android.app.ApplicationExitInfo.REASON_USER_STOPPED: reason = "stopped by the user"; break;
+        default: reason = info.getReason() == 14 ? "frozen in the background" : "other (" + info.getReason() + ")"; break;
+        }
+        String detail = info.getDescription();
+        long minutes = Math.max(0, (System.currentTimeMillis() - info.getTimestamp()) / 60000);
+        return reason + (detail == null || detail.isEmpty() ? "" : " (" + detail + ")") + ", " + minutes + " min ago";
+    }
+
     // Экраны автозапуска оболочек, которые убивают фоновые приложения сверх оптимизации батареи
     private static Intent[] autostartIntents()
     {

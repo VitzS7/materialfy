@@ -71,6 +71,8 @@ public:
   Q_INVOKABLE void moveTaskToBack();
   // Что мешает музыке играть в фоне: "battery", "notifications", "promoted", "autostart" (пусто — всё в порядке)
   Q_INVOKABLE QStringList backgroundIssues() const;
+  // Почему система закрыла прошлый процесс (пусто, если неизвестно)
+  Q_INVOKABLE QString lastExit() const;
   // Открыть системный экран для пункта из backgroundIssues
   Q_INVOKABLE void openBackgroundSetting(const QString& what);
   // Короткий тактильный отклик (долгое нажатие, переключатели)

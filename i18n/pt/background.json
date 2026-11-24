@@ -12,5 +12,6 @@
   "Your phone also keeps a list of apps allowed to run in the background. Turn Materialfy on there.": "Seu celular também tem uma lista de apps que podem rodar em segundo plano. Ative o Materialfy nela.",
   "Open settings": "Abrir configurações",
   "Check": "Verificar",
-  "Battery optimization, notifications and autostart, so Android does not close Materialfy in the background": "Otimização de bateria, notificações e inicialização automática, para o Android não fechar o Materialfy em segundo plano"
+  "Battery optimization, notifications and autostart, so Android does not close Materialfy in the background": "Otimização de bateria, notificações e inicialização automática, para o Android não fechar o Materialfy em segundo plano",
+  "Last time it was closed: {0}": "Última vez que foi fechado: {0}"
 }

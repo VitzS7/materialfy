@@ -12,5 +12,6 @@
   "Your phone also keeps a list of apps allowed to run in the background. Turn Materialfy on there.": "В телефоне есть и свой список приложений, которым можно работать в фоне. Включите там Materialfy.",
   "Open settings": "Открыть настройки",
   "Check": "Проверить",
-  "Battery optimization, notifications and autostart, so Android does not close Materialfy in the background": "Оптимизация батареи, уведомления и автозапуск, чтобы Android не закрывал Materialfy в фоне"
+  "Battery optimization, notifications and autostart, so Android does not close Materialfy in the background": "Оптимизация батареи, уведомления и автозапуск, чтобы Android не закрывал Materialfy в фоне",
+  "Last time it was closed: {0}": "Последнее закрытие: {0}"
 }
